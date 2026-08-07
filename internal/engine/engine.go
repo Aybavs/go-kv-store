@@ -31,6 +31,9 @@ type Engine struct {
 // mutation state can no longer be trusted; the supervisor turns that into a
 // fatal shutdown. It must be non-nil.
 func New(onFatal func(error)) *Engine {
+	if onFatal == nil {
+		panic("engine: New requires a non-nil onFatal; fatal conditions must be reportable")
+	}
 	return &Engine{
 		store:              store.New(),
 		acceptingMutations: true,
@@ -41,6 +44,12 @@ func New(onFatal func(error)) *Engine {
 // guard converts a panic inside the commit path into a reported fatal
 // condition. Panics do not cross goroutine boundaries in Go, so reporting to
 // the supervisor — not re-panicking alone — is what triggers shutdown.
+//
+// Note the deferred ordering in the mutation methods: guard is registered before
+// the unlock, so the lock is already released by the time this runs. That is
+// deliberate — reporting while still holding the lock would deadlock if onFatal
+// ever called back into the engine — but it means shared state is visible to
+// other goroutines before the fatal condition is reported.
 func (e *Engine) guard() {
 	if r := recover(); r != nil {
 		e.onFatal(fmt.Errorf("engine commit path panic: %v\n%s", r, debug.Stack()))

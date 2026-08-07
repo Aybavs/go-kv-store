@@ -42,11 +42,12 @@ construction. Revisit only on profiling evidence of allocation or GC pressure.
 
 ## Consequences
 
-- Writes serialise on one lock. This is measured, not assumed; see
-  `docs/benchmarks.md`.
+- Writes serialise on one lock. Whether that becomes a bottleneck is a question
+  for measurement, not assumption: benchmarks land in v0.5 and are recorded in
+  `docs/benchmarks.md`. Until then this record claims no performance result.
 - Store tests are fully deterministic — no sleeps, no clock abstraction.
 - Exact compiler allocation behaviour is not part of the contract. Allocation
-  counts are established by benchmarks.
+  counts are to be established by benchmarks rather than assumed.
 - The engine boundary is also the fatal-panic boundary: a panic inside the
   commit path invalidates shared-state assumptions and is reported to the
   supervisor rather than recovered.
