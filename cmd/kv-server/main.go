@@ -3,7 +3,6 @@ package main
 
 import (
 	"context"
-	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -61,13 +60,7 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	if err := srv.Run(ctx); err != nil {
-		if errors.Is(err, server.ErrShutdownTimeout) {
-			return err
-		}
-		return err
-	}
-	return nil
+	return srv.Run(ctx)
 }
 
 func parseLevel(s string) (slog.Level, error) {

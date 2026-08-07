@@ -3,6 +3,7 @@ package server
 import (
 	"bufio"
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"net"
@@ -226,6 +227,46 @@ func TestServerConcurrentClients(t *testing.T) {
 	for i := 0; i < clients; i++ {
 		if err := <-errs; err != nil {
 			t.Fatalf("client %d: %v", i, err)
+		}
+	}
+}
+
+// TestFatalDuringGracefulShutdownIsNotLost pins the failure this package exists
+// to prevent: a fatal condition reported while a graceful drain is already in
+// progress must still reach Run's return value, so the process exits non-zero.
+//
+// Before the supervisor broadcast a closed channel instead of delivering a
+// value, this returned nil in 200 of 200 runs — the drain consumed the branch
+// and nothing ever read the report.
+func TestFatalDuringGracefulShutdownIsNotLost(t *testing.T) {
+	fatal := errors.New("engine invariant violated mid-drain")
+
+	for i := 0; i < 50; i++ {
+		cfg := DefaultConfig()
+		cfg.Addr = "127.0.0.1:0"
+
+		sup := NewSupervisor()
+		eng := engine.New(sup.Fatal)
+		reg := command.New(eng)
+		srv := New(cfg, eng, reg, sup, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+		ctx, cancel := context.WithCancel(context.Background())
+		ready := make(chan struct{})
+		done := make(chan error, 1)
+		go func() { done <- srv.RunWithReady(ctx, ready) }()
+		<-ready
+
+		cancel()
+		go sup.Fatal(fatal)
+
+		select {
+		case err := <-done:
+			if !errors.Is(err, fatal) {
+				t.Fatalf("run %d: Run returned %v, want the fatal cause; a fatal reported "+
+					"during shutdown must not be swallowed", i, err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("run %d: Run did not return", i)
 		}
 	}
 }

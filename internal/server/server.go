@@ -94,8 +94,8 @@ func (s *Server) RunWithReady(ctx context.Context, ready chan<- struct{}) error 
 	select {
 	case <-ctx.Done():
 		return s.gracefulShutdown()
-	case err := <-s.sup.C():
-		return s.fatalShutdown(err)
+	case <-s.sup.Done():
+		return s.fatalShutdown(s.sup.Cause())
 	}
 }
 
@@ -122,6 +122,7 @@ func (s *Server) admit(conn net.Conn) bool {
 	s.mu.Lock()
 	if s.nClient >= s.cfg.MaxClients {
 		s.mu.Unlock()
+		_ = conn.SetWriteDeadline(time.Now().Add(s.cfg.WriteTimeout))
 		w := resp.NewWriter(conn)
 		_ = w.WriteError("ERR max number of clients reached")
 		_ = w.Flush()
@@ -160,7 +161,34 @@ func (s *Server) gracefulShutdown() error {
 	}
 	s.mu.Unlock()
 
-	if s.waitConns(s.cfg.ShutdownTimeout) {
+	drained := s.waitConns(s.cfg.ShutdownTimeout)
+
+	// waitConns returning is a race against Fatal, not a happens-before: with no
+	// connections left to drain, waitConns can return in the same instant a
+	// concurrently-reported fatal is still a few scheduler-cycles from closing
+	// sup.Done(). Give it one bounded, non-spinning window to land before
+	// deciding there was no fatal — this blocks (no CPU burn) and returns the
+	// moment sup.Done() closes, so the common no-fatal shutdown only pays the
+	// full 5ms when nothing else was going to preempt it anyway.
+	if !s.sup.Fired() {
+		select {
+		case <-s.sup.Done():
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+
+	// RunWithReady's select has already committed to this branch, so this is the
+	// only remaining place a fatal condition can be observed. Reporting it here
+	// is what stops the process exiting 0 after an invariant violation.
+	if s.sup.Fired() {
+		cause := s.sup.Cause()
+		s.log.Error("fatal condition reported during shutdown", "err", cause)
+		s.closeAllConns()
+		s.waitConns(2 * time.Second)
+		return cause
+	}
+
+	if drained {
 		s.log.Info("shutdown: complete")
 		return nil
 	}
@@ -191,6 +219,9 @@ func (s *Server) closeAllConns() {
 	s.mu.Unlock()
 }
 
+// waitConns waits for connection goroutines to finish. It reports whether they
+// all finished, and returns early if a fatal condition is reported — there is no
+// point draining politely once the server's own invariants are untrustworthy.
 func (s *Server) waitConns(d time.Duration) bool {
 	done := make(chan struct{})
 	go func() {
@@ -200,6 +231,8 @@ func (s *Server) waitConns(d time.Duration) bool {
 	select {
 	case <-done:
 		return true
+	case <-s.sup.Done():
+		return false
 	case <-time.After(d):
 		return false
 	}
