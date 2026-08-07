@@ -6,6 +6,7 @@ import (
 	"io"
 	"reflect"
 	"testing"
+	"testing/iotest"
 )
 
 func readAll(t *testing.T, input string) [][][]byte {
@@ -83,4 +84,98 @@ func TestReadCommandEmptyStreamIsCleanEOF(t *testing.T) {
 	if _, err := r.ReadCommand(); !errors.Is(err, io.EOF) {
 		t.Fatalf("want io.EOF on an empty stream, got %#v", err)
 	}
+}
+
+// TestReadCommandFragmentedAtEveryBoundary feeds the same frame one byte at a
+// time. TCP may deliver a frame split at any offset, so the decoder must never
+// depend on a whole frame arriving in one read.
+func TestReadCommandFragmentedAtEveryBoundary(t *testing.T) {
+	const frame = "*3\r\n$3\r\nSET\r\n$5\r\nhello\r\n$5\r\nworld\r\n"
+	r := NewReader(iotest.OneByteReader(bytes.NewReader([]byte(frame))), DefaultLimits())
+
+	args, err := r.ReadCommand()
+	if err != nil {
+		t.Fatalf("ReadCommand: %v", err)
+	}
+	want := [][]byte{[]byte("SET"), []byte("hello"), []byte("world")}
+	if !reflect.DeepEqual(args, want) {
+		t.Fatalf("got %q, want %q", args, want)
+	}
+}
+
+func TestReadCommandCleanEOFBetweenFrames(t *testing.T) {
+	r := NewReader(bytes.NewReader([]byte("*1\r\n$4\r\nPING\r\n")), DefaultLimits())
+	if _, err := r.ReadCommand(); err != nil {
+		t.Fatalf("first ReadCommand: %v", err)
+	}
+	if _, err := r.ReadCommand(); !errors.Is(err, io.EOF) {
+		t.Fatalf("want io.EOF between frames, got %v", err)
+	}
+}
+
+func TestReadCommandMalformed(t *testing.T) {
+	cases := map[string]string{
+		"not an array":          "+OK\r\n",
+		"inline command":        "PING\r\n",
+		"negative multibulk":    "*-1\r\n",
+		"zero multibulk":        "*0\r\n",
+		"non-numeric multibulk": "*x\r\n",
+		"element not bulk":      "*1\r\n+OK\r\n",
+		"negative bulk length":  "*1\r\n$-1\r\n",
+		"bad bulk terminator":   "*1\r\n$3\r\nabcXX",
+		"truncated mid-bulk":    "*1\r\n$5\r\nab",
+		"lf without cr":         "*1\n",
+	}
+	for name, input := range cases {
+		t.Run(name, func(t *testing.T) {
+			r := NewReader(bytes.NewReader([]byte(input)), DefaultLimits())
+			_, err := r.ReadCommand()
+			var pe *ProtocolError
+			if !errors.As(err, &pe) {
+				t.Fatalf("want *ProtocolError, got %#v", err)
+			}
+		})
+	}
+}
+
+func TestReadCommandLimits(t *testing.T) {
+	small := Limits{MaxArrayElements: 2, MaxBulkLength: 4}
+
+	t.Run("too many elements", func(t *testing.T) {
+		r := NewReader(bytes.NewReader([]byte("*3\r\n$1\r\na\r\n$1\r\nb\r\n$1\r\nc\r\n")), small)
+		_, err := r.ReadCommand()
+		var pe *ProtocolError
+		if !errors.As(err, &pe) {
+			t.Fatalf("want *ProtocolError, got %#v", err)
+		}
+	})
+
+	t.Run("bulk too long", func(t *testing.T) {
+		r := NewReader(bytes.NewReader([]byte("*1\r\n$5\r\nabcde\r\n")), small)
+		_, err := r.ReadCommand()
+		var pe *ProtocolError
+		if !errors.As(err, &pe) {
+			t.Fatalf("want *ProtocolError, got %#v", err)
+		}
+	})
+}
+
+// FuzzReadCommand asserts the decoder never panics on arbitrary input. Its
+// input is entirely attacker-controlled, so this is the highest-value fuzz
+// target in the project.
+func FuzzReadCommand(f *testing.F) {
+	f.Add([]byte("*1\r\n$4\r\nPING\r\n"))
+	f.Add([]byte("*3\r\n$3\r\nSET\r\n$1\r\na\r\n$1\r\n1\r\n"))
+	f.Add([]byte("*2\r\n$3\r\nGET\r\n$0\r\n\r\n"))
+	f.Add([]byte("*x\r\n"))
+	f.Add([]byte("$-1\r\n"))
+
+	f.Fuzz(func(t *testing.T, data []byte) {
+		r := NewReader(bytes.NewReader(data), DefaultLimits())
+		for i := 0; i < 32; i++ {
+			if _, err := r.ReadCommand(); err != nil {
+				return
+			}
+		}
+	})
 }
