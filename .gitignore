@@ -1,0 +1,13 @@
+# Build output
+/bin/
+*.test
+*.out
+
+# Agent working files — never committed
+.agent/
+.superpowers/
+CLAUDE.md
+AGENTS.md
+
+# macOS
+.DS_Store
