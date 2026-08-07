@@ -183,3 +183,59 @@ func TestDelRejectedWhileDraining(t *testing.T) {
 		t.Fatalf("got %+v, want error", got)
 	}
 }
+
+// TestReadsContinueWhileDraining pins that draining refuses mutations only.
+// Both read commands must keep answering: a client that is mid-read when
+// shutdown begins should get its answer, not an error.
+func TestReadsContinueWhileDraining(t *testing.T) {
+	r, e := newTestRegistry(t)
+	r.Dispatch(args("SET", "a", "1"))
+	r.Dispatch(args("SET", "b", "2"))
+
+	e.BeginDrain()
+
+	if got := r.Dispatch(args("GET", "a")); got.Kind != ReplyBulk || got.Str != "1" {
+		t.Fatalf("GET while draining = %+v, want bulk \"1\"", got)
+	}
+	if got := r.Dispatch(args("EXISTS", "a", "b", "missing")); got.Kind != ReplyInt || got.Int != 2 {
+		t.Fatalf("EXISTS while draining = %+v, want integer 2", got)
+	}
+	if got := r.Dispatch(args("GET", "missing")); got.Kind != ReplyNullBulk {
+		t.Fatalf("GET of a missing key while draining = %+v, want null bulk", got)
+	}
+	if got := r.Dispatch(args("PING")); got.Kind != ReplySimple || got.Str != "PONG" {
+		t.Fatalf("PING while draining = %+v, want simple PONG", got)
+	}
+}
+
+// TestEmptyValueIsNotAMissingKey pins the distinction between a key holding an
+// empty string and a key that does not exist. They encode differently on the
+// wire ($0\r\n\r\n versus $-1\r\n), so Kind — not Str — must discriminate them.
+func TestEmptyValueIsNotAMissingKey(t *testing.T) {
+	r, _ := newTestRegistry(t)
+
+	if got := r.Dispatch(args("SET", "empty", "")); got.Kind != ReplySimple {
+		t.Fatalf("SET with an empty value = %+v, want simple OK", got)
+	}
+
+	stored := r.Dispatch(args("GET", "empty"))
+	if stored.Kind != ReplyBulk {
+		t.Fatalf("GET of an empty value = %+v, want a bulk reply, not null bulk", stored)
+	}
+	if stored.Str != "" {
+		t.Fatalf("GET of an empty value returned %q, want the empty string", stored.Str)
+	}
+
+	missing := r.Dispatch(args("GET", "absent"))
+	if missing.Kind != ReplyNullBulk {
+		t.Fatalf("GET of a missing key = %+v, want null bulk", missing)
+	}
+
+	if stored.Kind == missing.Kind {
+		t.Fatal("an empty stored value and a missing key produced the same reply kind")
+	}
+
+	if got := r.Dispatch(args("EXISTS", "empty")); got.Kind != ReplyInt || got.Int != 1 {
+		t.Fatalf("EXISTS on a key holding an empty value = %+v, want integer 1", got)
+	}
+}
