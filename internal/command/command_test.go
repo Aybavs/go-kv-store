@@ -128,3 +128,58 @@ func TestMutationRejectedWhileDraining(t *testing.T) {
 		t.Fatalf("reads must continue while draining, got %+v", read)
 	}
 }
+
+func TestDel(t *testing.T) {
+	r, _ := newTestRegistry(t)
+	r.Dispatch(args("SET", "a", "1"))
+	r.Dispatch(args("SET", "b", "2"))
+
+	got := r.Dispatch(args("DEL", "a", "missing", "b"))
+	if got.Kind != ReplyInt || got.Int != 2 {
+		t.Fatalf("got %+v, want integer 2", got)
+	}
+	if after := r.Dispatch(args("GET", "a")); after.Kind != ReplyNullBulk {
+		t.Fatalf("key survived DEL: %+v", after)
+	}
+}
+
+func TestDelSingleKey(t *testing.T) {
+	r, _ := newTestRegistry(t)
+	r.Dispatch(args("SET", "k", "v"))
+	if got := r.Dispatch(args("DEL", "k")); got.Kind != ReplyInt || got.Int != 1 {
+		t.Fatalf("got %+v, want integer 1", got)
+	}
+}
+
+func TestExistsCountsDuplicates(t *testing.T) {
+	r, _ := newTestRegistry(t)
+	r.Dispatch(args("SET", "a", "1"))
+
+	if got := r.Dispatch(args("EXISTS", "a")); got.Kind != ReplyInt || got.Int != 1 {
+		t.Fatalf("got %+v, want integer 1", got)
+	}
+	if got := r.Dispatch(args("EXISTS", "a", "a", "missing")); got.Int != 2 {
+		t.Fatalf("got %+v, want integer 2 (duplicates counted)", got)
+	}
+	if got := r.Dispatch(args("EXISTS", "missing")); got.Int != 0 {
+		t.Fatalf("got %+v, want integer 0", got)
+	}
+}
+
+func TestDelExistsArity(t *testing.T) {
+	r, _ := newTestRegistry(t)
+	for _, a := range [][][]byte{args("DEL"), args("EXISTS")} {
+		if got := r.Dispatch(a); got.Kind != ReplyError {
+			t.Fatalf("%q: got %+v, want error", a, got)
+		}
+	}
+}
+
+func TestDelRejectedWhileDraining(t *testing.T) {
+	r, e := newTestRegistry(t)
+	r.Dispatch(args("SET", "k", "v"))
+	e.BeginDrain()
+	if got := r.Dispatch(args("DEL", "k")); got.Kind != ReplyError {
+		t.Fatalf("got %+v, want error", got)
+	}
+}

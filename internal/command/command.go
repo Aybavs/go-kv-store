@@ -31,6 +31,8 @@ func New(e *engine.Engine) *Registry {
 	r.cmds["PING"] = spec{minArgs: 1, maxArgs: 1, run: cmdPing}
 	r.cmds["SET"] = spec{minArgs: 3, maxArgs: 3, run: cmdSet}
 	r.cmds["GET"] = spec{minArgs: 2, maxArgs: 2, run: cmdGet}
+	r.cmds["DEL"] = spec{minArgs: 2, maxArgs: -1, run: cmdDel}
+	r.cmds["EXISTS"] = spec{minArgs: 2, maxArgs: -1, run: cmdExists}
 	return r
 }
 
@@ -77,4 +79,25 @@ func cmdGet(e *engine.Engine, args [][]byte) Reply {
 		return NullBulk()
 	}
 	return Bulk(v)
+}
+
+// ownedKeys copies the borrowed key arguments into owned strings.
+func ownedKeys(args [][]byte) []string {
+	keys := make([]string, 0, len(args)-1)
+	for _, a := range args[1:] {
+		keys = append(keys, string(a))
+	}
+	return keys
+}
+
+func cmdDel(e *engine.Engine, args [][]byte) Reply {
+	n, err := e.Delete(ownedKeys(args))
+	if err != nil {
+		return mutationError(err)
+	}
+	return Int(int64(n))
+}
+
+func cmdExists(e *engine.Engine, args [][]byte) Reply {
+	return Int(int64(e.Exists(ownedKeys(args))))
 }
