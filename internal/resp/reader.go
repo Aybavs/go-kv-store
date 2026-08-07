@@ -137,6 +137,12 @@ func (r *Reader) readLine() ([]byte, error) {
 		if errors.Is(err, bufio.ErrBufferFull) {
 			return nil, protoErr("header line too long")
 		}
+		// ReadSlice hands back whatever it had buffered alongside the error.
+		// Bytes present here mean the stream ended part-way through a header
+		// line — a truncated frame, not a clean disconnect between frames.
+		if len(line) > 0 && (errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF)) {
+			return nil, protoErr("unexpected end of stream inside frame")
+		}
 		return nil, err
 	}
 	if len(line) < 2 || line[len(line)-2] != '\r' {
