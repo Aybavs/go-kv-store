@@ -7,6 +7,10 @@ import (
 )
 
 // Writer encodes RESP2 replies. It buffers; call Flush to deliver.
+//
+// A write that fails partway through a reply leaves the partial bytes buffered.
+// Callers must not Flush after a write error — doing so emits a truncated frame.
+// Close the connection instead.
 type Writer struct {
 	bw  *bufio.Writer
 	num []byte // scratch for integer formatting

@@ -38,9 +38,10 @@ func TestWriterTypes(t *testing.T) {
 	}
 }
 
-// TestWriterRoundTrip encodes an MGET-shaped array reply and decodes the bulk
-// payloads back, proving encoder and decoder agree on framing.
-func TestWriterRoundTrip(t *testing.T) {
+// TestWriterArrayFraming pins the exact bytes of an MGET-shaped array reply
+// against a hand-written expectation. It checks the encoder alone; see
+// TestWriterDecoderRoundTrip for encoder/decoder agreement.
+func TestWriterArrayFraming(t *testing.T) {
 	var buf bytes.Buffer
 	w := NewWriter(&buf)
 	if err := w.WriteArrayHeader(2); err != nil {
@@ -57,5 +58,41 @@ func TestWriterRoundTrip(t *testing.T) {
 	}
 	if got, want := buf.String(), "*2\r\n$3\r\none\r\n$3\r\ntwo\r\n"; got != want {
 		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
+// TestWriterDecoderRoundTrip encodes an array of bulk strings and reads it back
+// through this package's own decoder. This is the property the append-only file
+// will rely on later: records written by the encoder must be parseable by the
+// same decoder that reads the network, including for empty and binary payloads.
+func TestWriterDecoderRoundTrip(t *testing.T) {
+	values := []string{"one", "two", "", "bin\x00\r\nary"}
+
+	var buf bytes.Buffer
+	w := NewWriter(&buf)
+	if err := w.WriteArrayHeader(len(values)); err != nil {
+		t.Fatalf("WriteArrayHeader: %v", err)
+	}
+	for _, v := range values {
+		if err := w.WriteBulk(v); err != nil {
+			t.Fatalf("WriteBulk(%q): %v", v, err)
+		}
+	}
+	if err := w.Flush(); err != nil {
+		t.Fatalf("Flush: %v", err)
+	}
+
+	r := NewReader(bytes.NewReader(buf.Bytes()), DefaultLimits())
+	args, err := r.ReadCommand()
+	if err != nil {
+		t.Fatalf("ReadCommand: %v", err)
+	}
+	if len(args) != len(values) {
+		t.Fatalf("decoded %d elements, want %d", len(args), len(values))
+	}
+	for i, want := range values {
+		if string(args[i]) != want {
+			t.Fatalf("element %d: got %q, want %q", i, args[i], want)
+		}
 	}
 }
