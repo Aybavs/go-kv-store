@@ -23,6 +23,11 @@ func DefaultLimits() Limits {
 	}
 }
 
+// maxPreallocation bounds how much the decoder reserves before the corresponding
+// bytes have actually arrived. A peer can declare a huge bulk length in a dozen
+// bytes; without this bound the declaration alone would allocate the full amount.
+const maxPreallocation = 64 << 10 // 64 KiB
+
 // ProtocolError means the stream cannot be resynchronised. The caller must
 // close the connection; there is no reliable point to resume parsing from.
 type ProtocolError struct{ Msg string }
@@ -52,7 +57,20 @@ func NewReader(r io.Reader, limits Limits) *Reader {
 }
 
 // ReadCommand reads one request frame: a RESP2 array of bulk strings.
-// It returns io.EOF when the peer closed the connection cleanly between frames.
+//
+// The returned slices are borrowed: they point into an internal buffer that the
+// next call reuses. Copy anything you retain beyond the current command.
+//
+// Errors fall into exactly three classes, and callers must distinguish them:
+//
+//   - io.EOF — the peer closed cleanly between frames. Close without replying.
+//     A stream that ends part-way through a frame is never reported this way;
+//     it is a *ProtocolError.
+//   - *ProtocolError — the peer sent something unparseable. The stream cannot be
+//     resynchronised, so write an error reply and then close.
+//   - any other error — a transport failure from the underlying reader (read
+//     deadline, connection reset). The connection is already broken; close
+//     without attempting to reply.
 func (r *Reader) ReadCommand() ([][]byte, error) {
 	line, err := r.readLine()
 	if err != nil {
@@ -107,10 +125,21 @@ func (r *Reader) readBulk() error {
 	}
 
 	start := len(r.buf)
-	r.buf = slices.Grow(r.buf, ln+2)
-	r.buf = r.buf[:start+ln+2]
-	if _, err := io.ReadFull(r.br, r.buf[start:start+ln+2]); err != nil {
-		return bulkReadErr(err)
+	// Read the payload plus its trailing CRLF in bounded chunks, so memory
+	// grows with data that has actually arrived rather than with the peer's
+	// claim about what is coming.
+	for remaining := ln + 2; remaining > 0; {
+		chunk := remaining
+		if chunk > maxPreallocation {
+			chunk = maxPreallocation
+		}
+		at := len(r.buf)
+		r.buf = slices.Grow(r.buf, chunk)
+		r.buf = r.buf[:at+chunk]
+		if _, err := io.ReadFull(r.br, r.buf[at:at+chunk]); err != nil {
+			return bulkReadErr(err)
+		}
+		remaining -= chunk
 	}
 	if r.buf[start+ln] != '\r' || r.buf[start+ln+1] != '\n' {
 		return protoErr("bulk string not terminated by CRLF")
@@ -172,7 +201,7 @@ func parseInt(b []byte) (int, error) {
 			return 0, errors.New("non-digit in integer")
 		}
 		n = n*10 + int(c-'0')
-		if n > 1<<40 { // far above any legal limit; prevents overflow
+		if n > 1<<30 { // far above any legal limit, and fits a 32-bit int
 			return 0, errors.New("integer too large")
 		}
 	}

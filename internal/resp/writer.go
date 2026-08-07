@@ -59,6 +59,10 @@ func (w *Writer) WriteNullBulk() error {
 	return err
 }
 
+// WriteArrayHeader writes an array header; the caller writes n elements after
+// it. Note the asymmetry with this package's decoder: n below 1 encodes an
+// empty or null array, which is valid on the reply side but is rejected by
+// ReadCommand, which only decodes requests.
 func (w *Writer) WriteArrayHeader(n int) error {
 	if err := w.bw.WriteByte('*'); err != nil {
 		return err
