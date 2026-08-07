@@ -97,6 +97,8 @@ func TestReadCommandFragmentedAtEveryBoundary(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadCommand: %v", err)
 	}
+	// Safe to compare args directly: ReadCommand is called once, so nothing
+	// reuses the decoder's buffer before this comparison.
 	want := [][]byte{[]byte("SET"), []byte("hello"), []byte("world")}
 	if !reflect.DeepEqual(args, want) {
 		t.Fatalf("got %q, want %q", args, want)
@@ -158,24 +160,58 @@ func TestReadCommandLimits(t *testing.T) {
 			t.Fatalf("want *ProtocolError, got %#v", err)
 		}
 	})
+
+	t.Run("element count exactly at limit is accepted", func(t *testing.T) {
+		r := NewReader(bytes.NewReader([]byte("*2\r\n$1\r\na\r\n$1\r\nb\r\n")), small)
+		args, err := r.ReadCommand()
+		if err != nil {
+			t.Fatalf("ReadCommand: %v", err)
+		}
+		want := [][]byte{[]byte("a"), []byte("b")}
+		if !reflect.DeepEqual(args, want) {
+			t.Fatalf("got %q, want %q", args, want)
+		}
+	})
+
+	t.Run("bulk length exactly at limit is accepted", func(t *testing.T) {
+		r := NewReader(bytes.NewReader([]byte("*1\r\n$4\r\nabcd\r\n")), small)
+		args, err := r.ReadCommand()
+		if err != nil {
+			t.Fatalf("ReadCommand: %v", err)
+		}
+		want := [][]byte{[]byte("abcd")}
+		if !reflect.DeepEqual(args, want) {
+			t.Fatalf("got %q, want %q", args, want)
+		}
+	})
 }
 
-// FuzzReadCommand asserts the decoder never panics on arbitrary input. Its
-// input is entirely attacker-controlled, so this is the highest-value fuzz
-// target in the project.
+// FuzzReadCommand asserts two properties over arbitrary input: the decoder
+// never panics, and every error it returns honours the package's contract —
+// either a between-frames io.EOF or a *ProtocolError, never a raw stdlib
+// error. The second property matters because leaking a raw io.EOF for a
+// truncated frame is a real bug this package has already had once.
 func FuzzReadCommand(f *testing.F) {
 	f.Add([]byte("*1\r\n$4\r\nPING\r\n"))
 	f.Add([]byte("*3\r\n$3\r\nSET\r\n$1\r\na\r\n$1\r\n1\r\n"))
 	f.Add([]byte("*2\r\n$3\r\nGET\r\n$0\r\n\r\n"))
+	f.Add([]byte("*3\r\n$3\r\nSET\r\n$1\r\nk\r\n$4\r\na\x00\r\x00\r\n"))
+	f.Add([]byte("*1\r\n$99999999999999999999\r\n"))
 	f.Add([]byte("*x\r\n"))
 	f.Add([]byte("$-1\r\n"))
 
 	f.Fuzz(func(t *testing.T, data []byte) {
 		r := NewReader(bytes.NewReader(data), DefaultLimits())
 		for i := 0; i < 32; i++ {
-			if _, err := r.ReadCommand(); err != nil {
+			_, err := r.ReadCommand()
+			if err == nil {
+				continue
+			}
+			var pe *ProtocolError
+			if errors.Is(err, io.EOF) || errors.As(err, &pe) {
 				return
 			}
+			t.Fatalf("ReadCommand returned %#v; want io.EOF or *ProtocolError", err)
 		}
 	})
 }
