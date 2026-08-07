@@ -29,6 +29,8 @@ type Registry struct {
 func New(e *engine.Engine) *Registry {
 	r := &Registry{engine: e, cmds: make(map[string]spec)}
 	r.cmds["PING"] = spec{minArgs: 1, maxArgs: 1, run: cmdPing}
+	r.cmds["SET"] = spec{minArgs: 3, maxArgs: 3, run: cmdSet}
+	r.cmds["GET"] = spec{minArgs: 2, maxArgs: 2, run: cmdGet}
 	return r
 }
 
@@ -58,3 +60,21 @@ func mutationError(err error) Reply {
 }
 
 func cmdPing(_ *engine.Engine, _ [][]byte) Reply { return Simple("PONG") }
+
+// cmdSet converts the borrowed key and value bytes into owned strings. This is
+// the ownership boundary: nothing beyond this point aliases the parser buffer.
+func cmdSet(e *engine.Engine, args [][]byte) Reply {
+	key, value := string(args[1]), string(args[2])
+	if err := e.Set(key, value); err != nil {
+		return mutationError(err)
+	}
+	return Simple("OK")
+}
+
+func cmdGet(e *engine.Engine, args [][]byte) Reply {
+	v, ok := e.Get(string(args[1]))
+	if !ok {
+		return NullBulk()
+	}
+	return Bulk(v)
+}
