@@ -163,23 +163,15 @@ func (s *Server) gracefulShutdown() error {
 
 	drained := s.waitConns(s.cfg.ShutdownTimeout)
 
-	// waitConns returning is a race against Fatal, not a happens-before: with no
-	// connections left to drain, waitConns can return in the same instant a
-	// concurrently-reported fatal is still a few scheduler-cycles from closing
-	// sup.Done(). Give it one bounded, non-spinning window to land before
-	// deciding there was no fatal — this blocks (no CPU burn) and returns the
-	// moment sup.Done() closes, so the common no-fatal shutdown only pays the
-	// full 5ms when nothing else was going to preempt it anyway.
-	if !s.sup.Fired() {
-		select {
-		case <-s.sup.Done():
-		case <-time.After(5 * time.Millisecond):
-		}
-	}
-
 	// RunWithReady's select has already committed to this branch, so this is the
 	// only remaining place a fatal condition can be observed. Reporting it here
 	// is what stops the process exiting 0 after an invariant violation.
+	//
+	// The guarantee is deliberately scoped to what is knowable: a fatal reported
+	// at any point before this check is surfaced. A fatal reported after the
+	// shutdown has already decided its outcome is not, and must not be — by then
+	// the drain genuinely completed, and waiting around for a report that may
+	// never come would only make every clean shutdown slower.
 	if s.sup.Fired() {
 		cause := s.sup.Cause()
 		s.log.Error("fatal condition reported during shutdown", "err", cause)

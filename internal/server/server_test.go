@@ -2,11 +2,13 @@ package server
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"errors"
 	"io"
 	"log/slog"
 	"net"
+	"strings"
 	"testing"
 	"time"
 
@@ -231,42 +233,102 @@ func TestServerConcurrentClients(t *testing.T) {
 	}
 }
 
-// TestFatalDuringGracefulShutdownIsNotLost pins the failure this package exists
-// to prevent: a fatal condition reported while a graceful drain is already in
-// progress must still reach Run's return value, so the process exits non-zero.
+// newBoundServer builds a Server with a bound listener but no running accept
+// loop, so a shutdown path can be driven directly instead of through Run's
+// select. Driving it directly is what makes the shutdown assertions
+// deterministic: Run picks a ready select case at random, which decides the path
+// for reasons that have nothing to do with the behaviour under test.
+func newBoundServer(t *testing.T) (*Server, *Supervisor, *bytes.Buffer) {
+	t.Helper()
+
+	cfg := DefaultConfig()
+	cfg.Addr = "127.0.0.1:0"
+
+	sup := NewSupervisor()
+	eng := engine.New(sup.Fatal)
+	reg := command.New(eng)
+
+	var logs bytes.Buffer
+	srv := New(cfg, eng, reg, sup, slog.New(slog.NewTextHandler(&logs, nil)))
+
+	ln, err := net.Listen("tcp", cfg.Addr)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	srv.ln = ln
+	t.Cleanup(func() { _ = ln.Close() })
+
+	return srv, sup, &logs
+}
+
+// TestGracefulShutdownSurfacesPendingFatal is the regression test for the defect
+// this package's supervisor exists to prevent.
 //
-// Before the supervisor broadcast a closed channel instead of delivering a
-// value, this returned nil in 200 of 200 runs — the drain consumed the branch
-// and nothing ever read the report.
-func TestFatalDuringGracefulShutdownIsNotLost(t *testing.T) {
-	fatal := errors.New("engine invariant violated mid-drain")
+// The supervisor used to deliver a fatal condition as a channel *value*, so it
+// could be received exactly once. RunWithReady's select commits to one branch;
+// once ctx.Done() won, gracefulShutdown ran and nothing ever read the report.
+// The process then logged "shutdown: complete" and exited 0 — claiming a clean
+// shutdown after an unrecoverable invariant violation. Closing a channel
+// broadcasts instead, and gracefulShutdown checks before it decides its return.
+//
+// The path is driven directly rather than through Run, because reaching it via
+// Run depends on which ready select case Go happens to pick.
+func TestGracefulShutdownSurfacesPendingFatal(t *testing.T) {
+	srv, sup, logs := newBoundServer(t)
+	fatal := errors.New("engine invariant violated during shutdown")
 
-	for i := 0; i < 50; i++ {
-		cfg := DefaultConfig()
-		cfg.Addr = "127.0.0.1:0"
+	sup.Fatal(fatal)
 
-		sup := NewSupervisor()
-		eng := engine.New(sup.Fatal)
-		reg := command.New(eng)
-		srv := New(cfg, eng, reg, sup, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	err := srv.gracefulShutdown()
+	if !errors.Is(err, fatal) {
+		t.Fatalf("gracefulShutdown returned %v, want the pending fatal cause; a "+
+			"reported fatal must not be swallowed by a drain", err)
+	}
+	if strings.Contains(logs.String(), "shutdown: complete") {
+		t.Errorf("shutdown logged completion despite a pending fatal:\n%s", logs.String())
+	}
+}
 
-		ctx, cancel := context.WithCancel(context.Background())
-		ready := make(chan struct{})
-		done := make(chan error, 1)
-		go func() { done <- srv.RunWithReady(ctx, ready) }()
-		<-ready
+// TestGracefulShutdownReturnsNilWhenNothingFailed is the counterpart: without a
+// fatal, the same path must report success. Without this, the test above could
+// be satisfied by a shutdown that always failed.
+func TestGracefulShutdownReturnsNilWhenNothingFailed(t *testing.T) {
+	srv, _, logs := newBoundServer(t)
 
-		cancel()
-		go sup.Fatal(fatal)
+	if err := srv.gracefulShutdown(); err != nil {
+		t.Fatalf("gracefulShutdown returned %v, want nil for a clean drain", err)
+	}
+	if !strings.Contains(logs.String(), "shutdown: complete") {
+		t.Errorf("clean shutdown did not log completion:\n%s", logs.String())
+	}
+}
 
-		select {
-		case err := <-done:
-			if !errors.Is(err, fatal) {
-				t.Fatalf("run %d: Run returned %v, want the fatal cause; a fatal reported "+
-					"during shutdown must not be swallowed", i, err)
-			}
-		case <-time.After(5 * time.Second):
-			t.Fatalf("run %d: Run did not return", i)
+// TestRunSurfacesFatalWhileServing covers the other entry into the fatal path:
+// a condition reported while the server is simply running, with no shutdown
+// signal involved.
+func TestRunSurfacesFatalWhileServing(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Addr = "127.0.0.1:0"
+
+	sup := NewSupervisor()
+	eng := engine.New(sup.Fatal)
+	reg := command.New(eng)
+	srv := New(cfg, eng, reg, sup, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	ready := make(chan struct{})
+	done := make(chan error, 1)
+	go func() { done <- srv.RunWithReady(context.Background(), ready) }()
+	<-ready
+
+	fatal := errors.New("engine invariant violated while serving")
+	sup.Fatal(fatal)
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, fatal) {
+			t.Fatalf("Run returned %v, want the fatal cause", err)
 		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not return after a fatal condition was reported")
 	}
 }
