@@ -140,11 +140,28 @@ func (e *Engine) Finalize(ctx context.Context) error {
 // That is a documented consequence, not an oversight.
 //
 // Must be called with e.mu held.
-func (e *Engine) commit(rec aof.Record, apply func()) (uint64, error) {
+func (e *Engine) commitSet(key, value string, deadline time.Time, hasTTL bool, apply func()) (uint64, error) {
 	if e.log == nil {
 		apply()
 		return 0, nil
 	}
+	return e.commit(aof.DeriveSet(key, value, deadline, hasTTL), apply)
+}
+
+// commitDel is commitSet's counterpart for the other record shape.
+func (e *Engine) commitDel(keys []string, apply func()) (uint64, error) {
+	if e.log == nil {
+		apply()
+		return 0, nil
+	}
+	return e.commit(aof.DeriveDel(keys), apply)
+}
+
+// commit appends and applies. The two wrappers above exist so the record is
+// never built when there is no log to put it in: passing aof.DeriveSet(...) as
+// an argument evaluates it whether or not it is used, and that cost showed up
+// as a 55% regression on EngineSet with persistence switched off.
+func (e *Engine) commit(rec aof.Record, apply func()) (uint64, error) {
 	seq, err := e.log.Append(rec)
 	if err != nil {
 		// Memory is untouched. This is the only failure mode where that is
@@ -267,7 +284,7 @@ func (e *Engine) Set(key, value string, ttl TTL) error {
 			// command arrived.
 			deadline = e.now().Add(ttl.d)
 		}
-		return e.commit(aof.DeriveSet(key, value, deadline, ttl.set), func() {
+		return e.commitSet(key, value, deadline, ttl.set, func() {
 			e.store.Set(key, value, deadline, ttl.set)
 		})
 	}()
@@ -317,7 +334,7 @@ func (e *Engine) Expire(key string, d time.Duration) (bool, error) {
 		}
 		applied = true
 		deadline := now.Add(d)
-		return e.commit(aof.DeriveSet(key, value, deadline, true), func() {
+		return e.commitSet(key, value, deadline, true, func() {
 			e.store.Expire(key, deadline, now)
 		})
 	}()
@@ -351,7 +368,7 @@ func (e *Engine) Persist(key string) (bool, error) {
 			return 0, nil // no TTL to remove; nothing changes, nothing recorded
 		}
 		removed = true
-		return e.commit(aof.DeriveSet(key, value, time.Time{}, false), func() {
+		return e.commitSet(key, value, time.Time{}, false, func() {
 			e.store.Persist(key, now)
 		})
 	}()
@@ -407,7 +424,7 @@ func (e *Engine) Delete(keys []string) (int, error) {
 			apply()
 			return 0, nil // nothing observable changed, so nothing is recorded
 		}
-		return e.commit(aof.DeriveDel(live), apply)
+		return e.commitDel(live, apply)
 	}()
 	if err != nil {
 		return 0, err

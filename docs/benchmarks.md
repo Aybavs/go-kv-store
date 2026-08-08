@@ -1,14 +1,19 @@
 # Benchmarks
 
-These are micro-benchmarks establishing a v0.1.0 baseline. End-to-end
-throughput and latency distributions arrive in v0.5.
+Micro-benchmarks, current as of v0.3.0. End-to-end throughput and latency
+distributions arrive in v0.5.
+
+Every number here comes from an actual run on the machine named below. Nothing
+is estimated, and nothing is carried over from an earlier version — carrying
+numbers forward is what let a 55% regression sit unnoticed, as the last section
+describes.
 
 ## Environment
 
 | | |
 |---|---|
 | CPU | Apple M4 (10 cores) |
-| OS | macOS 26.4.1 |
+| OS | macOS 26.4.1 (APFS, internal SSD) |
 | Go | go1.26.1 darwin/arm64 |
 | Command | `make bench` (`go test -bench=. -benchmem -run='^$' ./...`) |
 
@@ -16,60 +21,79 @@ throughput and latency distributions arrive in v0.5.
 
 ```
 pkg: github.com/aybavs/go-kv-store/internal/store
-BenchmarkStoreSet-10                 84212410        14.40 ns/op       0 B/op   0 allocs/op
-BenchmarkStoreSetWithTTL-10          49233460        24.38 ns/op       0 B/op   0 allocs/op
-BenchmarkStoreGetHit-10             100000000        11.00 ns/op       0 B/op   0 allocs/op
-BenchmarkStoreGetHitWithTTL-10       64393804        18.65 ns/op       0 B/op   0 allocs/op
-BenchmarkStoreGetMiss-10            231666231         5.072 ns/op      0 B/op   0 allocs/op
+BenchmarkStoreSet-10                          82705848        14.72 ns/op       0 B/op   0 allocs/op
+BenchmarkStoreSetWithTTL-10                   49347938        24.39 ns/op       0 B/op   0 allocs/op
+BenchmarkStoreGetHit-10                      100000000        11.26 ns/op       0 B/op   0 allocs/op
+BenchmarkStoreGetHitWithTTL-10                60900436        19.01 ns/op       0 B/op   0 allocs/op
+BenchmarkStoreGetMiss-10                     231575439         5.113 ns/op      0 B/op   0 allocs/op
 
 pkg: github.com/aybavs/go-kv-store/internal/resp
-BenchmarkReadCommand-10              11219654       106.1 ns/op  348.81 MB/s    0 B/op   0 allocs/op
-BenchmarkWriteBulk-10                40845501        27.80 ns/op       0 B/op   0 allocs/op
-BenchmarkWriteError-10               34072194        35.09 ns/op       0 B/op   0 allocs/op
+BenchmarkReadCommand-10                       10687462       108.6 ns/op  340.62 MB/s   0 B/op   0 allocs/op
+BenchmarkWriteBulk-10                         42120656        27.66 ns/op       0 B/op   0 allocs/op
+BenchmarkWriteError-10                        33781048        35.26 ns/op       0 B/op   0 allocs/op
 
 pkg: github.com/aybavs/go-kv-store/internal/engine
-BenchmarkEngineSet-10                35691136        32.22 ns/op       0 B/op   0 allocs/op
-BenchmarkEngineGet-10                73367198        17.09 ns/op       0 B/op   0 allocs/op
-BenchmarkEngineParallelReads-10       8648599       138.9 ns/op        2 B/op   0 allocs/op
-BenchmarkEngineParallelMixed-10       6431696       194.7 ns/op       10 B/op   1 allocs/op
+BenchmarkEngineSet-10                         26299279        41.89 ns/op       0 B/op   0 allocs/op
+BenchmarkEngineGet-10                         71359722        16.29 ns/op       0 B/op   0 allocs/op
+BenchmarkEngineParallelReads-10                9131733       130.9 ns/op        2 B/op   0 allocs/op
+BenchmarkEngineParallelMixed-10                6504892       184.3 ns/op       10 B/op   1 allocs/op
+BenchmarkEngineSetLoggedEverysec-10            1283890       946.0 ns/op       64 B/op   2 allocs/op
+BenchmarkEngineSetLoggedAlways-10              1000000      1001 ns/op         64 B/op   2 allocs/op
+BenchmarkEngineSetLoggedToDisk-10                  379   3678964 ns/op         64 B/op   2 allocs/op
+BenchmarkEngineSetLoggedToDiskParallel-10         1874    756653 ns/op         99 B/op   1 allocs/op
 ```
 
-## What expiration cost, and what nearly cost more
+## What persistence costs
 
-| | v0.1.0 | v0.2.0 | |
-|---|---|---|---|
-| `StoreGetHit` | 7.72 | 11.00 | +43% |
-| `StoreGetMiss` | 1.92 | 5.07 | +164% |
-| `EngineGet` | 11.55 | 17.09 | +48% |
-| `EngineSet` | 29.64 | 32.22 | +9% |
-| `EngineParallelReads` | 112.9 | 138.9 | +23% |
-| `EngineParallelMixed` | 172.8 | 194.7 | +13% |
+The first three logged figures use a stub file that accepts everything and syncs
+instantly, so they isolate what *this code* costs from what a device costs. The
+last two use a real file with a real `fsync`.
 
-Reads now consult a second map to find out whether a key carries a deadline,
-which is where the `store` numbers go. `GetMiss` looks alarming in percentage
-terms and is not: it went from one failed map lookup to two, on an operation
-that was already down at two nanoseconds.
+| | ns/op | |
+|---|---|---|
+| `EngineSet` | 41.9 | no log attached |
+| `EngineSetLoggedEverysec` | 946 | + hand off to the writer, wait for `write()` |
+| `EngineSetLoggedAlways` | 1001 | + wait for `Sync()` |
+| `EngineSetLoggedToDisk` | 3 678 964 | a real `fsync` per write |
+| `EngineSetLoggedToDiskParallel` | 756 653 | the same, with writers in flight |
 
-The interesting part is the number that is **not** in the table. Before the fix
-below, `EngineGet` measured **69.85 ns**, more than five times its v0.1.0 cost.
-Almost none of that was the second map lookup:
+Three things are worth reading off this table.
 
-```
-BenchmarkClockRead-10    46121582    53.69 ns/op
-```
+**Most of the in-process cost is a goroutine handoff, not encoding.** Going from
+42 ns to 946 ns is the round trip: append to the buffer, wake the writer, wait
+on a condition variable for the marker to advance. Encoding a record is a small
+part of that.
 
-`time.Now` costs about 54 ns on this machine, against roughly 4 ns for the map
-work around it, and the engine was reading it on every single read. The engine
-now skips the clock entirely when no key in the store carries a deadline, which
-brought `EngineGet` back to 17.09 ns. A test pins both directions: the clock is
-read when a deadline exists, and not read when none does.
+**`fsync` dominates everything else by four orders of magnitude.** One durable
+write to a real file costs about 3.7 ms here. Any reasoning about durability
+that starts from the nanosecond figures is reasoning about the wrong number.
 
-Worth recording, because the design anticipated the wrong cost. Spec §4.3 has a
-note reserving an escalation path — caching a `hasTTL` flag beside the value so
-the common path needs one lookup — for exactly this situation. Had we taken it
-without measuring, we would have optimised roughly 4 ns and left the 54 ns
-alone. The recorded escalation path is still available and still unused; the
-measurement says it is not where the time goes.
+**Group commit is real, and this is the measurement that says so.** The same
+workload with concurrent writers costs 757 µs per operation instead of 3.7 ms —
+about 4.8× — because writers waiting on the same `Sync` share one syscall. Spec
+§6.6 claims this follows from the construction rather than from a separate
+mechanism; until now nothing checked it.
+
+## A regression this file caught
+
+`docs/benchmarks.md` carried v0.2 numbers while v0.3 put the AOF into the commit
+path. The assumption was that with persistence off nothing would change.
+Measurement disagreed: `EngineSet` had gone from **32.22 ns to 49.81 ns, 55%
+slower, with no log attached at all**.
+
+The cause was an argument evaluated whether or not it was used —
+`aof.DeriveSet(...)` built a record at every call site, including when there was
+no log to put it in. Deriving only when there is a log brought it to 41.9 ns.
+
+The remaining ~10 ns over the v0.2 baseline is the commit path's shape and is
+being kept deliberately. The mutation methods wrap their locked section in a
+closure so that the durability wait is structurally outside the lock; that
+closure carries two `defer`s and therefore is not inlined. Removing it would
+recover the time and give up the ordering guarantee that `guard` runs after the
+unlock — without which a panic could leave `onFatal` deadlocked against a held
+lock. Ten nanoseconds on a path that already costs 108 ns to decode its own
+command is not worth that trade, and if end-to-end work in v0.5 ever says
+otherwise, it will say so with a number.
 
 ## Notes
 
