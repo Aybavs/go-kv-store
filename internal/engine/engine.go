@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"runtime/debug"
 	"sync"
+	"time"
 
 	"github.com/aybavs/go-kv-store/internal/store"
 )
@@ -23,19 +24,35 @@ type Engine struct {
 	acceptingMutations bool
 
 	onFatal func(error)
+
+	// store never reads the clock, so the engine supplies it. Injected for the
+	// same reason onFatal is: TTL behaviour is otherwise only testable by
+	// sleeping, and this project has twice been bitten by tests that wait.
+	now func() time.Time
 }
 
 // New returns an Engine. onFatal is called when an invariant of the shared
 // mutation state can no longer be trusted; the supervisor turns that into a
 // fatal shutdown. It must be non-nil.
 func New(onFatal func(error)) *Engine {
+	return NewWithClock(onFatal, time.Now)
+}
+
+// NewWithClock is New with the clock supplied. Production code uses New; tests
+// pass a clock they control so expiry can be reached by moving time rather than
+// by waiting for it.
+func NewWithClock(onFatal func(error), now func() time.Time) *Engine {
 	if onFatal == nil {
 		panic("engine: New requires a non-nil onFatal; fatal conditions must be reportable")
+	}
+	if now == nil {
+		panic("engine: New requires a non-nil clock")
 	}
 	return &Engine{
 		store:              store.New(),
 		acceptingMutations: true,
 		onFatal:            onFatal,
+		now:                now,
 	}
 }
 
@@ -55,7 +72,7 @@ func (e *Engine) guard() {
 func (e *Engine) Get(key string) (string, bool) {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
-	return e.store.Get(key)
+	return e.store.Get(key, e.now())
 }
 
 // Exists reports how many of keys are present. Duplicates are counted
@@ -63,9 +80,12 @@ func (e *Engine) Get(key string) (string, bool) {
 func (e *Engine) Exists(keys []string) int {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
+	// One clock read for the whole call, so a key cannot be judged against a
+	// later instant than the key before it in the same EXISTS.
+	now := e.now()
 	n := 0
 	for _, k := range keys {
-		if _, ok := e.store.Get(k); ok {
+		if _, ok := e.store.Get(k, now); ok {
 			n++
 		}
 	}
@@ -79,7 +99,7 @@ func (e *Engine) Set(key, value string) error {
 	if !e.acceptingMutations {
 		return ErrDraining
 	}
-	e.store.Set(key, value)
+	e.store.Set(key, value, time.Time{}, false)
 	return nil
 }
 
