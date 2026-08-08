@@ -78,10 +78,16 @@ func echoName(b []byte) string {
 
 // mutationError maps engine mutation failures to client-visible replies.
 func mutationError(err error) Reply {
-	if errors.Is(err, engine.ErrDraining) {
+	switch {
+	case errors.Is(err, engine.ErrDraining):
 		return Err("ERR server is shutting down")
+	case errors.Is(err, engine.ErrPersistenceUnavailable):
+		// Distinct from an internal error because it is actionable: the log is
+		// broken and the operator needs to know that specifically.
+		return Err("ERR persistence unavailable")
+	default:
+		return Err("ERR internal error")
 	}
-	return Err("ERR internal error")
 }
 
 // cmdPing answers PONG, or echoes the optional message as a bulk string.

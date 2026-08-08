@@ -12,12 +12,18 @@ import (
 	"sync"
 	"time"
 
+	"github.com/aybavs/go-kv-store/internal/aof"
 	"github.com/aybavs/go-kv-store/internal/store"
 )
 
 // ErrDraining is returned when a mutation is attempted after the server has
 // begun shutting down.
 var ErrDraining = errors.New("server is shutting down")
+
+// ErrPersistenceUnavailable is returned when the log has already failed. The
+// mutation is refused before it reaches memory: applying it against a log known
+// to be broken would widen a divergence we already know about.
+var ErrPersistenceUnavailable = errors.New("persistence unavailable")
 
 // TTLStatus is engine's own, deliberately not store's: no store type crosses
 // this boundary, so command never has to import the storage layer to read a
@@ -61,6 +67,68 @@ type Engine struct {
 	expMu   sync.Mutex
 	expStop chan struct{}
 	expDone chan struct{}
+
+	// log is nil when persistence is off, which is the whole of the difference:
+	// every mutation path below degrades to exactly its v0.2 behaviour.
+	log    *aof.Log
+	policy aof.Policy
+	// appliedSeq is the sequence of the last mutation applied to memory. It is
+	// written under mu, so applied order and persisted order are the same
+	// order by construction rather than by care.
+	appliedSeq uint64
+}
+
+// AttachLog wires persistence in. It must be called before the engine serves,
+// and never twice.
+func (e *Engine) AttachLog(l *aof.Log, p aof.Policy) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.log != nil {
+		panic("engine: AttachLog called twice")
+	}
+	e.log = l
+	e.policy = p
+}
+
+// commit appends the effect and applies it to memory under one acquisition of
+// the lock, then returns the sequence to wait for. The caller awaits outside
+// the lock — see the mutation methods.
+//
+// The ordering here is Model A: memory becomes visible before the durability
+// acknowledgement. Another client may observe a mutation after its in-memory
+// linearisation point but before the originating client is told it is durable.
+// That is a documented consequence, not an oversight.
+//
+// Must be called with e.mu held.
+func (e *Engine) commit(rec aof.Record, apply func()) (uint64, error) {
+	if e.log == nil {
+		apply()
+		return 0, nil
+	}
+	seq, err := e.log.Append(rec)
+	if err != nil {
+		// Memory is untouched. This is the only failure mode where that is
+		// true, and it is why the check happens before the apply.
+		if errors.Is(err, aof.ErrFailed) {
+			return 0, errors.Join(ErrPersistenceUnavailable, err)
+		}
+		return 0, err
+	}
+	apply()
+	e.appliedSeq = seq
+	return seq, nil
+}
+
+// await blocks for durability outside the lock. A zero sequence means
+// persistence is off and there is nothing to wait for.
+func (e *Engine) await(seq uint64) error {
+	if e.log == nil || seq == 0 {
+		return nil
+	}
+	if err := e.log.Await(seq, e.policy); err != nil {
+		return errors.Join(ErrPersistenceUnavailable, err)
+	}
+	return nil
 }
 
 // New returns an Engine. onFatal is called when an invariant of the shared
@@ -145,21 +213,30 @@ func (e *Engine) Exists(keys []string) int {
 // which is Redis's rule: a SET with no expiry option is not "leave the old TTL
 // alone".
 func (e *Engine) Set(key, value string, ttl TTL) error {
-	defer e.guard()
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	if !e.acceptingMutations {
-		return ErrDraining
+	seq, err := func() (uint64, error) {
+		defer e.guard()
+		e.mu.Lock()
+		defer e.mu.Unlock()
+		if !e.acceptingMutations {
+			return 0, ErrDraining
+		}
+		var deadline time.Time
+		if ttl.set {
+			// Computed inside the lock, so the deadline is measured from the
+			// instant the write actually lands rather than from when the
+			// command arrived.
+			deadline = e.now().Add(ttl.d)
+		}
+		return e.commit(aof.DeriveSet(key, value, deadline, ttl.set), func() {
+			e.store.Set(key, value, deadline, ttl.set)
+		})
+	}()
+	if err != nil {
+		return err
 	}
-	var deadline time.Time
-	if ttl.set {
-		// Computed inside the lock, so the deadline is measured from the
-		// instant the write actually lands rather than from when the command
-		// arrived.
-		deadline = e.now().Add(ttl.d)
-	}
-	e.store.Set(key, value, deadline, ttl.set)
-	return nil
+	// Outside the lock, always. The closure above is what guarantees it: there
+	// is no path from here back into a held mutex.
+	return e.await(seq)
 }
 
 // TTL reports the time left on key. The duration is meaningful only when the
@@ -181,48 +258,121 @@ func (e *Engine) TTL(key string) (time.Duration, TTLStatus) {
 
 // Expire attaches a deadline to an existing key and reports whether it applied.
 func (e *Engine) Expire(key string, d time.Duration) (bool, error) {
-	defer e.guard()
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	if !e.acceptingMutations {
-		return false, ErrDraining
+	var applied bool
+	seq, err := func() (uint64, error) {
+		defer e.guard()
+		e.mu.Lock()
+		defer e.mu.Unlock()
+		if !e.acceptingMutations {
+			return 0, ErrDraining
+		}
+		now := e.now()
+		// The effect is a complete SET carrying the value the key already
+		// holds, so derivation has to read it. That read is inside the same
+		// lock acquisition as the write, so no other mutation can land between
+		// the two.
+		value, ok := e.store.Get(key, now)
+		if !ok {
+			return 0, nil // nothing happened, so nothing is recorded
+		}
+		applied = true
+		deadline := now.Add(d)
+		return e.commit(aof.DeriveSet(key, value, deadline, true), func() {
+			e.store.Expire(key, deadline, now)
+		})
+	}()
+	if err != nil {
+		return false, err
 	}
-	now := e.now()
-	return e.store.Expire(key, now.Add(d), now), nil
+	if !applied {
+		return false, nil
+	}
+	// applied is reported true even if the wait fails: the mutation is in
+	// memory and may already have been read by someone else.
+	return true, e.await(seq)
 }
 
 // Persist removes a key's deadline and reports whether there was one.
 func (e *Engine) Persist(key string) (bool, error) {
-	defer e.guard()
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	if !e.acceptingMutations {
-		return false, ErrDraining
+	var removed bool
+	seq, err := func() (uint64, error) {
+		defer e.guard()
+		e.mu.Lock()
+		defer e.mu.Unlock()
+		if !e.acceptingMutations {
+			return 0, ErrDraining
+		}
+		now := e.now()
+		value, ok := e.store.Get(key, now)
+		if !ok {
+			return 0, nil
+		}
+		if _, st := e.store.TTL(key, now); st != store.HasTTL {
+			return 0, nil // no TTL to remove; nothing changes, nothing recorded
+		}
+		removed = true
+		return e.commit(aof.DeriveSet(key, value, time.Time{}, false), func() {
+			e.store.Persist(key, now)
+		})
+	}()
+	if err != nil {
+		return false, err
 	}
-	return e.store.Persist(key, e.now()), nil
+	if !removed {
+		return false, nil
+	}
+	return true, e.await(seq)
 }
 
 // Delete removes every listed key and reports how many were present. The whole
 // operation happens under one lock hold, so it is atomic with respect to
 // concurrent readers.
 func (e *Engine) Delete(keys []string) (int, error) {
-	defer e.guard()
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	if !e.acceptingMutations {
-		return 0, ErrDraining
-	}
-	now := e.readNow()
-	n := 0
-	for _, k := range keys {
-		// An expired key is already absent to callers, so it must not be
-		// counted as removed even though deleting it reclaims the entry.
-		_, live := e.store.Get(k, now)
-		if e.store.Delete(k) && live {
-			n++
+	var removed int
+	seq, err := func() (uint64, error) {
+		defer e.guard()
+		e.mu.Lock()
+		defer e.mu.Unlock()
+		if !e.acceptingMutations {
+			return 0, ErrDraining
 		}
+		now := e.readNow()
+
+		// Decide what the record will say before anything is applied. Only
+		// keys that are live count and only they are recorded: an expired key
+		// is already absent to callers, and is already absent on replay too.
+		// Duplicates collapse, so DEL a a removes one key and reports one.
+		seen := make(map[string]struct{}, len(keys))
+		live := make([]string, 0, len(keys))
+		for _, k := range keys {
+			if _, ok := seen[k]; ok {
+				continue
+			}
+			seen[k] = struct{}{}
+			if _, ok := e.store.Get(k, now); ok {
+				live = append(live, k)
+			}
+		}
+		removed = len(live)
+
+		apply := func() {
+			// Every requested key is deleted, not only the live ones: that is
+			// how an expired entry gets reclaimed. Only the count and the
+			// record are restricted to live keys.
+			for _, k := range keys {
+				e.store.Delete(k)
+			}
+		}
+		if removed == 0 {
+			apply()
+			return 0, nil // nothing observable changed, so nothing is recorded
+		}
+		return e.commit(aof.DeriveDel(live), apply)
+	}()
+	if err != nil {
+		return 0, err
 	}
-	return n, nil
+	return removed, e.await(seq)
 }
 
 // BeginDrain closes mutation admission. It takes the same lock that mutations
