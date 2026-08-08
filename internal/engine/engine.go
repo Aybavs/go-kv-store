@@ -90,6 +90,46 @@ func (e *Engine) AttachLog(l *aof.Log, p aof.Policy) {
 	e.policy = p
 }
 
+// OpenLog recovers path into this engine's store and then appends to it.
+//
+// Recovery is done here rather than by the caller because the store is not
+// exported: handing it out so that main could replay into it would open the one
+// hole the package spends its whole design closing.
+//
+// The returned Result describes what recovery found. An error means the file
+// could not be trusted, and the caller must not start.
+func (e *Engine) OpenLog(path string, p aof.Policy, onFatal func(error)) (aof.Result, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.log != nil {
+		panic("engine: OpenLog called after a log was already attached")
+	}
+
+	// One instant for the whole replay, so a key cannot expire part-way
+	// through it and make the recovered state depend on how long it took.
+	l, res, err := aof.OpenFile(path, p, e.now(), e.store, onFatal)
+	if err != nil {
+		return res, err
+	}
+	e.log = l
+	e.policy = p
+	return res, nil
+}
+
+// Finalize drains the writer and syncs. It is the persistence stage of
+// shutdown, between draining and stopped: mutations have already stopped being
+// admitted, so whatever is still buffered is all there will ever be.
+func (e *Engine) Finalize(ctx context.Context) error {
+	e.mu.Lock()
+	l := e.log
+	e.mu.Unlock()
+
+	if l == nil {
+		return nil
+	}
+	return l.Close(ctx)
+}
+
 // commit appends the effect and applies it to memory under one acquisition of
 // the lock, then returns the sequence to wait for. The caller awaits outside
 // the lock — see the mutation methods.

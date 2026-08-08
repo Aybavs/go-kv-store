@@ -73,6 +73,13 @@ jobs:
       - name: fuzz seed corpus
         run: go test ./internal/resp/ -run=Fuzz
 
+      # Persistence is meant to be invisible to the protocol. Running the same
+      # differential suite with the log on is what makes that a checked claim.
+      - name: conformance with persistence enabled
+        env:
+          KV_AOF: '1'
+        run: go test -count=1 ./internal/conformance/
+
       # A separate module, so `go build ./...` above does not reach it and it
       # would rot unnoticed.
       - name: build the example client

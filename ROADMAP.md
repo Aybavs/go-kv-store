@@ -19,12 +19,12 @@ transactions and additional data types are explicit non-goals.
 - [x] Lazy expiration (correctness) and bounded active expiration (memory)
 - [x] Conformance extended to expiration semantics
 
-## v0.3 — Persistence
+## v0.3 — Persistence ✅
 
-- [ ] Append-only file with canonical effect records
-- [ ] `everysec` and `always` durability policies, with group commit
-- [ ] Startup recovery, torn-tail truncation, refusal on structural corruption
-- [ ] Fail-stop and fatal semantics on persistence failure
+- [x] Append-only file with canonical effect records
+- [x] `everysec` and `always` durability policies, with group commit
+- [x] Startup recovery, torn-tail truncation, refusal on structural corruption
+- [x] Fail-stop and fatal semantics on persistence failure
 
 ## v0.4 — Extended commands
 

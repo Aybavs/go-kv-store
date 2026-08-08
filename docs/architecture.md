@@ -103,6 +103,67 @@ would conflate two different things.
 clock at construction. Both exist so that expiry is reachable in tests by moving
 time rather than by waiting for it.
 
+## Persistence
+
+Off unless `--appendonly` is given. When it is on, every mutation is recorded as
+a **canonical effect** — the resulting state, never the command that caused it.
+`EXPIRE` becomes a `SET` carrying the value the key already holds, and `PERSIST`
+becomes a `SET` with no expiry. See [ADR 0004](design-decisions/0004-canonical-effect-logging.md)
+for the counterexample that rules command logging out.
+
+### File format
+
+Records are RESP2 arrays, decoded by the same hardened codec the wire protocol
+uses. The codec is shared; the semantics are not. Two decoders sit over one
+encoding and neither may reach the other: replay must never trigger client-only
+behaviour, and must never append records back into the log.
+
+The file opens with a 16-byte header — 8 bytes of magic, a 4-byte format version,
+4 reserved — so a server pointed at a foreign file refuses to start rather than
+interpreting its contents as data. An empty file is a new log, not a damaged
+one, and that distinction decides whether the server starts.
+
+### The commit path
+
+Under one acquisition of the engine lock: derive the effect, append it to the
+log's in-memory buffer, apply it to memory. Then release the lock and wait for
+durability outside it. Two properties follow from the shape rather than from
+care — persisted order equals applied order, and the store lock is never held
+across disk I/O. [ADR 0005](design-decisions/0005-model-a-durability.md) covers
+the consequence: visibility and durability acknowledgement are different
+boundaries.
+
+Progress is tracked as three logical sequence numbers rather than one overloaded
+position:
+
+    appliedSeq   last mutation applied to memory
+    writtenSeq   last record fully delivered to the OS via write()
+    syncedSeq    last record made durable via Sync()      (syncedSeq <= writtenSeq)
+
+`everysec` waits for `writtenSeq`; `always` waits for `syncedSeq`. Group commit
+is not a separate mechanism: a flush takes the whole pending buffer and syncs it
+once, so everything in that buffer shares the syscall by construction.
+
+A partial `write()` is treated as the normal contract it is. `writtenSeq` never
+advances past a record that was not delivered whole.
+
+### Recovery
+
+Three outcomes, and keeping them apart is the policy:
+
+| Stream ends | Meaning | Action |
+|---|---|---|
+| between records | complete log | replay all of it |
+| part-way through a record | torn tail — what a crash produces | truncate to the last boundary, continue |
+| structurally wrong, anywhere | corruption | refuse to start, report the byte offset |
+
+One `replayNow` is captured at the start and used for every deadline comparison,
+so a long replay cannot have a key expire part-way through it.
+
+An expired `SET` record **ensures the key is absent** rather than being skipped.
+Skipping would resurrect the value that record replaced: `SET k old` followed by
+an expired `SET k new PXAT T` must leave `k` gone, not holding `old`.
+
 ## Concurrency model
 
 One goroutine per connection. All shared state is behind a single

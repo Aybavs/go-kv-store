@@ -6,6 +6,40 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-08-09
+
+Persistence. Data survives a restart when `--appendonly` is on; it is off by
+default, and with it off nothing about the server changes.
+
+### Added
+
+- Append-only file recording **canonical effects**, not client commands.
+  `EXPIRE` becomes a `SET` carrying the value the key holds, `PERSIST` a `SET`
+  with no expiry. See ADR-0004 for the counterexample that rules command logging
+  out
+- `--appendonly`, `--appendfilename`, `--appendfsync everysec|always`
+- Startup recovery, with three distinct outcomes: a complete log is replayed, a
+  torn tail is truncated to the last complete record, and structural corruption
+  refuses to start and reports the byte offset
+- Persistence finalisation during shutdown, between draining and stopped: the
+  writer is drained and synced before the process exits
+- ADR-0004 and ADR-0005
+
+### Durability
+
+`always` acknowledges after `fsync`. `everysec` acknowledges after `write()`
+succeeds and syncs about once a second.
+
+**`everysec` is not Redis's `everysec`.** Redis acknowledges before the write;
+we acknowledge only once `write()` has succeeded. Same name, stronger guarantee.
+Stated in the flag's own help text, not only in the docs.
+
+### Known limitation
+
+No checksums. Structural validation catches torn tails and invalid records, but
+a flipped bit that still forms a valid record is undetectable. Listed as a future
+format improvement rather than shipped for completeness.
+
 ## [0.2.0] - 2026-08-08
 
 Key expiration.

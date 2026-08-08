@@ -179,6 +179,21 @@ func (s *Server) gracefulShutdown() error {
 
 	drained := s.waitConns(s.cfg.ShutdownTimeout)
 
+	// Persistence finalisation, between draining and stopped. Mutations have
+	// already stopped being admitted, so whatever is still buffered is all
+	// there will ever be — and a clean shutdown is the point where "written"
+	// stops being good enough.
+	//
+	// A failure here is reported to the supervisor rather than returned
+	// directly, so it goes through the same fatal path as any other durability
+	// failure and the exit code says the same thing.
+	finCtx, finCancel := context.WithTimeout(context.Background(), s.cfg.ShutdownTimeout)
+	if err := s.eng.Finalize(finCtx); err != nil {
+		s.log.Error("shutdown: persistence did not finalise cleanly", "err", err)
+		s.sup.Fatal(err)
+	}
+	finCancel()
+
 	// The select has committed to this branch, so this is the last place a fatal
 	// can be observed, and checking here is what stops the process exiting 0
 	// after an invariant violation. Scoped to what is knowable: one reported
