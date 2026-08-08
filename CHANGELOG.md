@@ -6,6 +6,47 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-08-08
+
+Key expiration.
+
+### Added
+
+- `SET key value [EX seconds | PX milliseconds]`, `EXPIRE`, `TTL` and `PERSIST`
+- Lazy expiration: a key is absent the moment its deadline passes, decided on
+  the read path with no write lock and no deletion
+- A bounded active expiration worker that reclaims memory on a timer. Work per
+  cycle is bounded; reclamation is eventual and best-effort
+- 29 further differential conformance scenarios, plus two timing tests that
+  compare the expiry transition itself against Redis
+
+### Changed
+
+- A `SET` with no expiry option now clears any TTL the key already had, which is
+  Redis's rule
+- `DEL` no longer counts a key whose deadline has passed. It was already absent
+  to the client, so reporting it removed would have leaked reclamation timing
+- `engine.Set` takes a TTL argument. The signature changed rather than gaining a
+  default-preserving variant, so no call site could keep the old behaviour by
+  accident
+
+### Performance
+
+- Reads consult a second map to find a deadline, costing `StoreGetHit` 7.7 → 11.0 ns
+- The engine skips reading the clock entirely when no key carries a deadline.
+  `time.Now` measures 53.7 ns on the reference machine against roughly 4 ns for
+  the map work around it, so reading it unconditionally had made `EngineGet`
+  69.9 ns — over five times its v0.1.0 cost. It is now 17.1 ns
+
+### Notes on Redis compatibility
+
+Three behaviours were measured against Redis 7 rather than assumed, and the
+assumption would have been wrong in each case:
+
+- `TTL` rounds to nearest, `(ms + 500) / 1000`, not up
+- `EXPIRE` with a non-positive value deletes the key and replies `1`
+- Repeating the same `SET` option is accepted, and the last one wins
+
 ## [0.1.2] - 2026-08-08
 
 The first release with downloadable binaries. No change to server behaviour:

@@ -12,12 +12,12 @@ transactions and additional data types are explicit non-goals.
 - [x] Graceful shutdown with a mutation admission gate
 - [x] Differential conformance against real Redis
 
-## v0.2 — Expiration
+## v0.2 — Expiration ✅
 
-- [ ] `SET key value EX|PX` — replaces the syntax-error rejection of SET options
-- [ ] `EXPIRE`, `TTL`, `PERSIST`
-- [ ] Lazy expiration (correctness) and bounded active expiration (memory)
-- [ ] Conformance extended to expiration semantics
+- [x] `SET key value EX|PX` — replaces the syntax-error rejection of SET options
+- [x] `EXPIRE`, `TTL`, `PERSIST`
+- [x] Lazy expiration (correctness) and bounded active expiration (memory)
+- [x] Conformance extended to expiration semantics
 
 ## v0.3 — Persistence
 

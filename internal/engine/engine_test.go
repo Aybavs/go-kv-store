@@ -245,12 +245,18 @@ func TestDeleteCountsEachKeyOnce(t *testing.T) {
 	}
 }
 
-// TestInjectedClockIsUsed pins the seam itself. The engine supplies the clock
-// that store's expiry checks are made against, so a read path that called
-// time.Now directly, or skipped the clock entirely, would leave every later TTL
-// test measuring nothing. Counting the calls is the only way to see that from
-// outside, since v0.2 has no TTL API on the engine yet.
-func TestInjectedClockIsUsed(t *testing.T) {
+// TestClockIsReadExactlyWhenItMatters pins both halves of the read path's
+// contract with the clock.
+//
+// Correctness: when a deadline exists, expiry must be judged against the
+// injected clock, or every later TTL test would be measuring nothing.
+//
+// Cost: when no deadline exists, the clock must not be read at all. That is not
+// tidiness — time.Now costs about 54 ns on this machine against roughly 4 ns
+// for the map lookups around it, so reading it unconditionally made the engine
+// read path more than five times slower than v0.1.0 for a store that might hold
+// no TTLs whatsoever.
+func TestClockIsReadExactlyWhenItMatters(t *testing.T) {
 	var calls int
 	fixed := time.Date(2026, 8, 8, 12, 0, 0, 0, time.UTC)
 	e := NewWithClock(
@@ -258,25 +264,44 @@ func TestInjectedClockIsUsed(t *testing.T) {
 		func() time.Time { calls++; return fixed },
 	)
 
-	if err := e.Set("k", "v", NoExpiry()); err != nil {
-		t.Fatalf("Set: %v", err)
-	}
-	if _, ok := e.Get("k"); !ok {
-		t.Fatal("Get did not find the key")
-	}
-	if calls == 0 {
-		t.Fatal("Get did not consult the injected clock; expiry would be judged against the wrong time")
-	}
+	t.Run("not read when nothing can expire", func(t *testing.T) {
+		if err := e.Set("plain", "v", NoExpiry()); err != nil {
+			t.Fatalf("Set: %v", err)
+		}
+		calls = 0
+		if _, ok := e.Get("plain"); !ok {
+			t.Fatal("Get did not find the key")
+		}
+		e.Exists([]string{"plain"})
+		e.TTL("plain")
+		if calls != 0 {
+			t.Fatalf("clock read %d times with no deadline in the store, want 0", calls)
+		}
+	})
 
-	before := calls
-	if n := e.Exists([]string{"k", "k", "absent"}); n != 2 {
-		t.Fatalf("Exists = %d, want 2", n)
-	}
-	// One read for the whole call, not one per key: keys in a single EXISTS
-	// must be judged against the same instant.
-	if got := calls - before; got != 1 {
-		t.Fatalf("Exists consulted the clock %d times, want 1 for the whole call", got)
-	}
+	t.Run("read once per call when a deadline exists", func(t *testing.T) {
+		if err := e.Set("timed", "v", ExpiresIn(time.Hour)); err != nil {
+			t.Fatalf("Set: %v", err)
+		}
+
+		calls = 0
+		if _, ok := e.Get("plain"); !ok {
+			t.Fatal("Get did not find the key")
+		}
+		if calls != 1 {
+			t.Fatalf("Get read the clock %d times, want 1", calls)
+		}
+
+		// Keys in a single EXISTS must be judged against the same instant, so
+		// one read covers the whole call however many keys it names.
+		calls = 0
+		if n := e.Exists([]string{"plain", "timed", "absent"}); n != 2 {
+			t.Fatalf("Exists = %d, want 2", n)
+		}
+		if calls != 1 {
+			t.Fatalf("Exists read the clock %d times, want 1 for the whole call", calls)
+		}
+	})
 }
 
 func TestNewRejectsNilClock(t *testing.T) {
