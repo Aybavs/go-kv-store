@@ -96,7 +96,7 @@ func cmdSet(e *engine.Engine, args [][]byte) Reply {
 		return Err("ERR syntax error")
 	}
 	key, value := string(args[1]), string(args[2])
-	if err := e.Set(key, value); err != nil {
+	if err := e.Set(key, value, engine.NoExpiry()); err != nil {
 		return mutationError(err)
 	}
 	return Simple("OK")

@@ -89,6 +89,11 @@ func (s *Server) RunWithReady(ctx context.Context, ready chan<- struct{}) error 
 		close(ready)
 	}
 
+	// Reclamation runs for as long as the server serves. It is not what makes
+	// expired keys disappear — the read path does that — so nothing depends on
+	// it having started.
+	s.eng.StartExpiration()
+
 	go s.acceptLoop()
 
 	select {
@@ -151,6 +156,17 @@ func (s *Server) releaseConn(conn net.Conn) {
 func (s *Server) gracefulShutdown() error {
 	s.log.Info("shutdown: draining")
 	_ = s.ln.Close()
+
+	// Before the gate, deliberately. The worker takes the write lock and is not
+	// a client mutation, so refusing it through the admission gate would
+	// conflate reclamation with a request; stopping it first means the question
+	// never arises.
+	stopCtx, cancel := context.WithTimeout(context.Background(), s.cfg.ShutdownTimeout)
+	if err := s.eng.StopExpiration(stopCtx); err != nil {
+		s.log.Warn("expiration worker did not stop in time", "err", err)
+	}
+	cancel()
+
 	s.eng.BeginDrain()
 	close(s.draining)
 
@@ -189,6 +205,12 @@ func (s *Server) gracefulShutdown() error {
 // fatalShutdown is a distinct path: there is no drain guarantee and no
 // durability claim. See spec §7.5.
 func (s *Server) fatalShutdown(cause error) error {
+	// Best effort: the process is going down either way, and a worker still
+	// holding the lock must not delay reporting why.
+	stopCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+	_ = s.eng.StopExpiration(stopCtx)
+	cancel()
+
 	s.log.Error("fatal condition, shutting down", "err", cause)
 	_ = s.ln.Close()
 	s.eng.BeginDrain()
