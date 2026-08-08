@@ -3,6 +3,10 @@
 *.test
 *.out
 
+# Building inside an example module drops the binary next to its source, named
+# after the directory. Build with -o /dev/null instead; this is the backstop.
+/examples/*/go-client
+
 # Agent working files — never committed
 .agent/
 .superpowers/

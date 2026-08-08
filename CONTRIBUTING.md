@@ -15,11 +15,16 @@ Go 1.26 or newer. Docker or a local Redis is needed for conformance tests.
     make test
     make test-race
 
-Conformance tests need a running Redis:
+Conformance tests need a running Redis. One target brings it up, runs them and
+takes it down again:
 
-    docker run --rm -d -p 6379:6379 --name kv-conformance redis:7-alpine
+    make conformance
+
+Or drive it by hand, which is the same thing:
+
+    docker compose up -d
     REDIS_ADDR=127.0.0.1:6379 go test ./internal/conformance/
-    docker stop kv-conformance
+    docker compose down
 
 Without `REDIS_ADDR` they skip with an explanatory message. CI fails if they
 skip there, since a silent skip would turn the differential comparison into a

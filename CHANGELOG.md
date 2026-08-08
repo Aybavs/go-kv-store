@@ -6,6 +6,18 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Release workflow: a tag push builds linux and darwin binaries for amd64 and
+  arm64, and uploads them with a `SHA256SUMS` file. It re-runs vet and the race
+  suite first, because a tag can be pushed at any commit, including one CI never
+  saw
+- `examples/go-client`, a working client that exercises every command using an
+  ordinary RESP2 library. Its own module, so the dependency stays out of the
+  server
+- `docker-compose.yml` and a `make conformance` target that brings the reference
+  Redis up, runs the differential suite and takes it down again
+
 ## [0.1.1] - 2026-08-08
 
 ### Fixed

@@ -1,0 +1,19 @@
+# Redis for the differential conformance tests. It is a reference oracle, not a
+# dependency of the server: nothing here is needed to build or run go-kv-store.
+#
+#   docker compose up -d
+#   REDIS_ADDR=127.0.0.1:6379 go test ./internal/conformance/
+#   docker compose down
+#
+# Or simply `make conformance`, which does all three.
+services:
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 10

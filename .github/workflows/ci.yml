@@ -73,6 +73,11 @@ jobs:
       - name: fuzz seed corpus
         run: go test ./internal/resp/ -run=Fuzz
 
+      # A separate module, so `go build ./...` above does not reach it and it
+      # would rot unnoticed.
+      - name: build the example client
+        run: cd examples/go-client && go build -o /dev/null ./...
+
   portability:
     name: Build and test (macOS)
     runs-on: macos-latest
