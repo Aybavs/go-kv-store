@@ -11,6 +11,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -19,6 +20,7 @@ import (
 
 	"github.com/gomodule/redigo/redis"
 
+	"github.com/aybavs/go-kv-store/internal/aof"
 	"github.com/aybavs/go-kv-store/internal/command"
 	"github.com/aybavs/go-kv-store/internal/engine"
 	"github.com/aybavs/go-kv-store/internal/server"
@@ -30,6 +32,11 @@ const dialTimeout = 5 * time.Second
 
 // Each call gets a fresh engine: Redis is reset with FLUSHDB and we have no
 // equivalent, so both sides start clean.
+//
+// With KV_AOF=1 the engine also writes an append-only file, into a directory
+// the test owns. Persistence is meant to be invisible to the protocol, and the
+// whole suite passing either way is what makes that a checked claim rather than
+// an assumption.
 func startOurServer(t *testing.T) string {
 	t.Helper()
 	cfg := server.DefaultConfig()
@@ -37,6 +44,20 @@ func startOurServer(t *testing.T) string {
 
 	sup := server.NewSupervisor()
 	eng := engine.New(sup.Fatal)
+
+	if os.Getenv("KV_AOF") == "1" {
+		path := filepath.Join(t.TempDir(), "appendonly.aof")
+		if _, err := eng.OpenLog(path, aof.Always, sup.Fatal); err != nil {
+			t.Fatalf("opening the append-only file: %v", err)
+		}
+		t.Cleanup(func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			if err := eng.Finalize(ctx); err != nil {
+				t.Errorf("finalising the log: %v", err)
+			}
+		})
+	}
 	reg := command.New(eng)
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	srv := server.New(cfg, eng, reg, sup, logger)

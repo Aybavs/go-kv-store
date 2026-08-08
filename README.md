@@ -100,6 +100,15 @@ Full wire format, error classes and the deviations from Redis are in
 | `--max-array-elements` | `1024` | maximum arguments per command |
 | `--max-command-bytes` | `128MiB` | maximum total argument bytes in one command |
 | `--loglevel` | `info` | `debug`, `info`, `warn`, `error` |
+| `--appendonly` | `false` | write an append-only file so data survives a restart |
+| `--appendfilename` | `appendonly.aof` | path to the append-only file |
+| `--appendfsync` | `everysec` | `always` or `everysec` — see below |
+
+`--appendfsync everysec` is **not** Redis's `everysec`. Redis acknowledges
+before the write; we acknowledge only once `write()` has succeeded, so an
+acknowledgement means the data reached the operating system. A machine or power
+failure can still lose writes made since the last successful `Sync`. Same name,
+stronger guarantee.
 
 CLI flags only — there is no config file and no environment-variable layer, so
 there is no precedence rule to learn.
@@ -131,7 +140,11 @@ Stated plainly rather than buried:
 
 - **Single node.** No replication, no clustering.
 - **No authentication, no TLS.** Anyone who can reach the port has full access.
-- **No persistence yet.** All data is lost on restart until v0.3.
+- **Persistence is opt-in.** Without `--appendonly`, data is lost on restart.
+- **No checksums in the append-only file.** Structural validation catches torn
+  tails and invalid records, but a flipped bit that still forms a valid record
+  is undetectable. Listed as a future format improvement rather than shipped for
+  completeness.
 - **Expiration is per-key only.** No eviction policy and no maxmemory.
 - **Strings only.** No List, Hash or Set.
 - **No transactions, no Pub/Sub, no `MSET`.**
