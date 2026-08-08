@@ -36,19 +36,47 @@ func BenchmarkEngineGet(b *testing.B) {
 	}
 }
 
-// BenchmarkEngineParallelReads measures RWMutex read scaling — the number the
-// v0.5 sharding decision will be made against.
+// benchKeys returns keys built once, outside the measured loop.
+//
+// The parallel benchmarks used to build their keys inside it, which put
+// strconv.Itoa and an allocation into the number the sharding decision is
+// supposed to be made against. Measured at roughly 17 ns of 121 — not the
+// dominant cost, but not nothing either, and the wrong thing entirely.
+func benchKeys(b *testing.B, e *Engine, n int) []string {
+	b.Helper()
+	keys := make([]string, n)
+	for i := range keys {
+		keys[i] = "key" + strconv.Itoa(i)
+		if err := e.Set(keys[i], "value", NoExpiry()); err != nil {
+			b.Fatal(err)
+		}
+	}
+	return keys
+}
+
+// BenchmarkEngineParallelReads measures RWMutex read scaling, and it is the
+// number ADR-0001's sharding question turns on.
+//
+// Run it across -cpu values rather than reading the single figure: reads do not
+// scale, they invert. RLock increments a counter shared by every reader, so the
+// cache line holding it ping-pongs between cores, and total throughput falls as
+// cores are added. On this machine 1 core sustains ~44 M ops/s and 10 cores
+// sustain ~10 M.
+//
+// That is a property of sync.RWMutex, not a defect here, and it is not on its
+// own an argument for sharding: this loop does nothing but lock, read and
+// unlock, while a real request also parses a command and makes syscalls. What
+// fraction of a real request the lock actually is remains unmeasured until the
+// end-to-end work in v0.5.
 func BenchmarkEngineParallelReads(b *testing.B) {
 	e := benchEngine(b)
-	for i := 0; i < 1000; i++ {
-		_ = e.Set("key"+strconv.Itoa(i), "value", NoExpiry())
-	}
+	keys := benchKeys(b, e, 1000)
 	b.ReportAllocs()
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
 		i := 0
 		for pb.Next() {
-			e.Get("key" + strconv.Itoa(i%1000))
+			e.Get(keys[i%len(keys)])
 			i++
 		}
 	})
@@ -58,15 +86,13 @@ func BenchmarkEngineParallelReads(b *testing.B) {
 // readers, all on the same lock.
 func BenchmarkEngineParallelMixed(b *testing.B) {
 	e := benchEngine(b)
-	for i := 0; i < 1000; i++ {
-		_ = e.Set("key"+strconv.Itoa(i), "value", NoExpiry())
-	}
+	keys := benchKeys(b, e, 1000)
 	b.ReportAllocs()
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
 		i := 0
 		for pb.Next() {
-			k := "key" + strconv.Itoa(i%1000)
+			k := keys[i%len(keys)]
 			if i%10 == 0 {
 				if err := e.Set(k, "value", NoExpiry()); err != nil {
 					b.Error(err)
