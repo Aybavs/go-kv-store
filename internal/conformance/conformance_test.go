@@ -160,6 +160,10 @@ func errorClass(msg string) string {
 		return "wrong-arity"
 	case strings.Contains(msg, "syntax error"):
 		return "syntax-error"
+	case strings.Contains(msg, "not an integer"):
+		return "not-an-integer"
+	case strings.Contains(msg, "invalid expire time"):
+		return "invalid-expire-time"
 	default:
 		return "other"
 	}
@@ -188,17 +192,55 @@ var scenarios = map[string][]step{
 	"unknown command":     {cmd("TOTALLYBOGUS")},
 	"unknown lowercase":   {cmd("totallybogus")},
 	"set wrong arity":     {cmd("SET", "only-key")},
-	// "extra" is not a SET option in Redis either, so both servers reject it.
-	// An option Redis does implement (EX, NX, ...) would diverge by design
-	// until v0.2 and is recorded as a deviation in docs/protocol.md instead.
-	"set unknown option": {cmd("SET", "k", "v", "extra")},
-	"get wrong arity":    {cmd("GET")},
-	"del wrong arity":    {cmd("DEL")},
-	"exists wrong arity": {cmd("EXISTS")},
-	"ping wrong arity":   {cmd("PING", "a", "b")},
-	"lowercase command":  {cmd("set", "a", "1"), cmd("get", "a")},
-	"mixed case command": {cmd("SeT", "a", "1"), cmd("GeT", "a")},
-	"long value":         {cmd("SET", "a", makeString(70000)), cmd("GET", "a")},
+	// EX and PX are implemented as of v0.2, so the interesting cases moved to
+	// the expiration block below. NX and KEEPTTL still diverge by design: Redis
+	// executes them and we answer with the same syntax error it gives an option
+	// it does not know, so the texts agree while the behaviour does not. That
+	// deviation is recorded in docs/protocol.md rather than exercised here.
+	"set option redis also rejects": {cmd("SET", "k", "v", "extra")},
+	"get wrong arity":               {cmd("GET")},
+	"del wrong arity":               {cmd("DEL")},
+	"exists wrong arity":            {cmd("EXISTS")},
+	"ping wrong arity":              {cmd("PING", "a", "b")},
+	"lowercase command":             {cmd("set", "a", "1"), cmd("get", "a")},
+	"mixed case command":            {cmd("SeT", "a", "1"), cmd("GeT", "a")},
+	"long value":                    {cmd("SET", "a", makeString(70000)), cmd("GET", "a")},
+
+	// Expiration. Deadlines here are long enough that the seconds a TTL
+	// reports cannot change between the two servers being asked, so these stay
+	// deterministic despite involving time. The one genuine transition is
+	// exercised separately in TestExpiryIsObservedByBothServers.
+	"set ex then ttl":         {cmd("SET", "a", "1", "EX", "100"), cmd("TTL", "a")},
+	"set px then ttl":         {cmd("SET", "a", "1", "PX", "100000"), cmd("TTL", "a")},
+	"set lowercase option":    {cmd("SET", "a", "1", "ex", "100"), cmd("TTL", "a")},
+	"set repeated option":     {cmd("SET", "a", "1", "EX", "10", "EX", "100"), cmd("TTL", "a")},
+	"set clears ttl":          {cmd("SET", "a", "1", "EX", "100"), cmd("SET", "a", "2"), cmd("TTL", "a")},
+	"ttl without ttl":         {cmd("SET", "a", "1"), cmd("TTL", "a")},
+	"ttl missing key":         {cmd("TTL", "nope")},
+	"persist removes ttl":     {cmd("SET", "a", "1", "EX", "100"), cmd("PERSIST", "a"), cmd("TTL", "a")},
+	"persist without ttl":     {cmd("SET", "a", "1"), cmd("PERSIST", "a")},
+	"persist missing key":     {cmd("PERSIST", "nope")},
+	"expire applies":          {cmd("SET", "a", "1"), cmd("EXPIRE", "a", "100"), cmd("TTL", "a")},
+	"expire missing key":      {cmd("EXPIRE", "nope", "100")},
+	"expire replaces ttl":     {cmd("SET", "a", "1", "EX", "10"), cmd("EXPIRE", "a", "100"), cmd("TTL", "a")},
+	"expire zero deletes":     {cmd("SET", "a", "1"), cmd("EXPIRE", "a", "0"), cmd("EXISTS", "a")},
+	"expire negative deletes": {cmd("SET", "a", "1"), cmd("EXPIRE", "a", "-5"), cmd("EXISTS", "a")},
+	"expire zero missing key": {cmd("EXPIRE", "nope", "0")},
+
+	// Option and argument errors, compared by class.
+	"set ex zero":           {cmd("SET", "a", "1", "EX", "0")},
+	"set ex negative":       {cmd("SET", "a", "1", "EX", "-1")},
+	"set px zero":           {cmd("SET", "a", "1", "PX", "0")},
+	"set ex out of range":   {cmd("SET", "a", "1", "EX", "9999999999999999")},
+	"set ex not an integer": {cmd("SET", "a", "1", "EX", "abc")},
+	"set ex without value":  {cmd("SET", "a", "1", "EX")},
+	"set ex and px":         {cmd("SET", "a", "1", "EX", "10", "PX", "100")},
+	"set unknown option":    {cmd("SET", "a", "1", "BOGUS")},
+	"expire not an integer": {cmd("SET", "a", "1"), cmd("EXPIRE", "a", "abc")},
+	"expire out of range":   {cmd("SET", "a", "1"), cmd("EXPIRE", "a", "9999999999999999")},
+	"expire wrong arity":    {cmd("EXPIRE", "a")},
+	"ttl wrong arity":       {cmd("TTL")},
+	"persist wrong arity":   {cmd("PERSIST")},
 }
 
 func makeString(n int) string {
@@ -340,4 +382,104 @@ func runPipelined(t *testing.T, addr string, steps []step, isRedis bool) []strin
 		out = append(out, normalise(t, reply, err))
 	}
 	return out
+}
+
+// do runs one command and returns its normalised reply. Go will not let a
+// two-value call be spliced into a longer argument list, so this exists rather
+// than a temporary pair at every call site.
+func do(t *testing.T, conn redis.Conn, args ...interface{}) string {
+	t.Helper()
+	reply, err := conn.Do(args[0].(string), args[1:]...)
+	return normalise(t, reply, err)
+}
+
+// TestExpiryIsObservedByBothServers is the one place in this suite where
+// waiting is legitimate. Everywhere else time is a parameter and expiry is
+// reached by moving a clock; Redis's clock is genuinely out of reach, so the
+// only way to compare the transition is to let it happen.
+//
+// The assertion is the transition itself — present, then absent — not how long
+// it took. A test that asserted a duration would be measuring the scheduler.
+func TestExpiryIsObservedByBothServers(t *testing.T) {
+	redisTarget := redisAddr(t)
+
+	const (
+		lifetimeMillis = 200
+		// Comfortably past the deadline. The test does not care how much of
+		// this is slack, only that the key is gone by the end of it.
+		waitFor = 600 * time.Millisecond
+	)
+
+	observe := func(addr string, isRedis bool) (before, after string) {
+		t.Helper()
+		conn := dial(t, addr)
+		if isRedis {
+			if _, err := conn.Do("FLUSHDB"); err != nil {
+				t.Fatalf("FLUSHDB: %v", err)
+			}
+		}
+		if _, err := conn.Do("SET", "k", "v", "PX", strconv.Itoa(lifetimeMillis)); err != nil {
+			t.Fatalf("SET: %v", err)
+		}
+		before = do(t, conn, "GET", "k")
+		time.Sleep(waitFor)
+		after = do(t, conn, "GET", "k")
+		return before, after
+	}
+
+	oursBefore, oursAfter := observe(startOurServer(t), false)
+	redisBefore, redisAfter := observe(redisTarget, true)
+
+	if oursBefore != redisBefore {
+		t.Errorf("before the deadline:\n  ours:  %s\n  redis: %s", oursBefore, redisBefore)
+	}
+	if oursAfter != redisAfter {
+		t.Errorf("after the deadline:\n  ours:  %s\n  redis: %s", oursAfter, redisAfter)
+	}
+	// Stated independently of the comparison, so a bug that made both sides
+	// return the same wrong thing still fails.
+	if oursBefore != "BULK:v" {
+		t.Errorf("key was not readable before its deadline: %s", oursBefore)
+	}
+	if oursAfter != "NIL" {
+		t.Errorf("key survived its deadline: %s", oursAfter)
+	}
+}
+
+// TestExpiredKeyIsInvisibleToEveryRead checks that expiry is not something only
+// GET notices. A key hidden from GET but still counted by EXISTS, or still
+// reporting a TTL, would be a partially applied deadline.
+func TestExpiredKeyIsInvisibleToEveryRead(t *testing.T) {
+	redisTarget := redisAddr(t)
+
+	probe := func(addr string, isRedis bool) []string {
+		t.Helper()
+		conn := dial(t, addr)
+		if isRedis {
+			if _, err := conn.Do("FLUSHDB"); err != nil {
+				t.Fatalf("FLUSHDB: %v", err)
+			}
+		}
+		if _, err := conn.Do("SET", "k", "v", "PX", "200"); err != nil {
+			t.Fatalf("SET: %v", err)
+		}
+		time.Sleep(600 * time.Millisecond)
+		return []string{
+			do(t, conn, "GET", "k"),
+			do(t, conn, "EXISTS", "k"),
+			do(t, conn, "TTL", "k"),
+			do(t, conn, "PERSIST", "k"),
+			do(t, conn, "DEL", "k"),
+		}
+	}
+
+	ours := probe(startOurServer(t), false)
+	want := probe(redisTarget, true)
+
+	names := []string{"GET", "EXISTS", "TTL", "PERSIST", "DEL"}
+	for i := range ours {
+		if ours[i] != want[i] {
+			t.Errorf("%s on an expired key:\n  ours:  %s\n  redis: %s", names[i], ours[i], want[i])
+		}
+	}
 }

@@ -163,3 +163,8 @@ func (s *Store) ReclaimExpired(now time.Time, limit int) (removed, examined int)
 // has passed but which have not been reclaimed. Len is the caller-facing count;
 // this one exists so reclamation can be observed at all.
 func (s *Store) PhysicalLen() int { return len(s.data) }
+
+// HasExpirations reports whether any key currently carries a deadline. It lets
+// a caller skip reading the clock when nothing can possibly be expired, which
+// matters because a clock read costs far more than these map lookups do.
+func (s *Store) HasExpirations() bool { return len(s.expires) > 0 }
