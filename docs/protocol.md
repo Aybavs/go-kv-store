@@ -115,10 +115,22 @@ Both are pinned by tests in `internal/command`.
 |---|---|---|
 | Arguments per command | `-max-array-elements` | 1024 |
 | Bulk string length | `-max-bulk-length` | 64 MiB |
+| Total argument bytes per command | `-max-command-bytes` | 128 MiB |
 | Concurrent clients | `-max-clients` | 1024 |
 | Idle read timeout | `-timeout` | disabled |
 
 Exceeding a size limit produces a protocol error and closes the connection.
+
+The first two limits bound one dimension each and multiply if nothing bounds
+their product: 1024 arguments of 64 MiB is a 64 GiB frame that both of them
+accept. `-max-command-bytes` bounds the total, and is the limit that decides how
+much one connection can make the server hold at once. It is checked against each
+declared length before any payload is read, so an oversized frame is refused
+without being buffered. Setting it to 0 disables the check.
+
+Peak resident memory during a maximum-size command is roughly three times the
+configured value, because the decode buffer grows by doubling and the previous
+array is still live while it is copied. Budget for that when raising the flag.
 Exceeding the client limit produces the max-clients error and closes the new
 connection; existing ones are unaffected.
 

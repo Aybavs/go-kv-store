@@ -95,6 +95,7 @@ Full wire format, error classes and the deviations from Redis are in
 | `--shutdown-timeout` | `10s` | graceful shutdown budget |
 | `--max-bulk-length` | `64MiB` | maximum bulk string length |
 | `--max-array-elements` | `1024` | maximum arguments per command |
+| `--max-command-bytes` | `128MiB` | maximum total argument bytes in one command |
 | `--loglevel` | `info` | `debug`, `info`, `warn`, `error` |
 
 CLI flags only — there is no config file and no environment-variable layer, so

@@ -10,9 +10,21 @@ import (
 )
 
 // Limits bound what the decoder will accept from an untrusted peer.
+//
+// MaxArrayElements and MaxBulkLength each bound one dimension of a request, and
+// on their own they multiply: with the defaults below, 1024 arguments of 64 MiB
+// each is a 64 GiB frame that both per-element limits accept. MaxCommandBytes
+// bounds the product, which is the only one of the three that bounds how much a
+// single connection can make the server hold at once.
 type Limits struct {
 	MaxArrayElements int
 	MaxBulkLength    int
+	// MaxCommandBytes caps the total payload of one request frame. It counts
+	// argument bytes only; the few bytes of per-element framing are not
+	// charged against it. Zero or negative disables the check, which is what a
+	// zero-value Limits gets — the server always sets it from DefaultLimits or
+	// a flag.
+	MaxCommandBytes int
 }
 
 // DefaultLimits returns the limits used by the server unless overridden.
@@ -20,6 +32,11 @@ func DefaultLimits() Limits {
 	return Limits{
 		MaxArrayElements: 1024,
 		MaxBulkLength:    64 << 20, // 64 MiB
+		// Twice MaxBulkLength: enough for a single maximum-size value plus its
+		// key and command name, so no request that the per-element limit allows
+		// is rejected for its total, while still bounding the frame at a size
+		// the process can hold.
+		MaxCommandBytes: 128 << 20, // 128 MiB
 	}
 }
 
@@ -27,6 +44,13 @@ func DefaultLimits() Limits {
 // bytes have actually arrived. A peer can declare a huge bulk length in a dozen
 // bytes; without this bound the declaration alone would allocate the full amount.
 const maxPreallocation = 64 << 10 // 64 KiB
+
+// maxRetainedBuffer bounds how much decode buffer a connection keeps between
+// commands. Anything larger is released once the command that grew it is done,
+// trading a reallocation on the next large command for not holding that memory
+// while the connection is idle. Ordinary traffic never reaches this size, so the
+// reuse that matters is unaffected.
+const maxRetainedBuffer = 1 << 20 // 1 MiB
 
 // ProtocolError means the stream cannot be resynchronised. The caller must
 // close the connection; there is no reliable point to resume parsing from.
@@ -90,6 +114,18 @@ func (r *Reader) ReadCommand() ([][]byte, error) {
 		return nil, protoErr("multibulk length exceeds limit")
 	}
 
+	// Release a buffer that one large command grew, instead of carrying its peak
+	// for the life of the connection. Reslicing to zero length keeps the whole
+	// capacity, so without this a client could send one maximum-size command and
+	// then sit idle holding that memory — and MaxCommandBytes would bound only
+	// the peak of a single command, not what a connection can park indefinitely.
+	//
+	// Done here rather than at the end of the previous call because the slices
+	// returned to the caller are borrowed from this buffer and stay valid until
+	// the next decode.
+	if cap(r.buf) > maxRetainedBuffer {
+		r.buf = nil
+	}
 	r.buf = r.buf[:0]
 	r.offsets = r.offsets[:0]
 
@@ -122,6 +158,13 @@ func (r *Reader) readBulk() error {
 	}
 	if ln > r.limits.MaxBulkLength {
 		return protoErr("bulk length exceeds limit")
+	}
+	// Checked against the declared length before a single payload byte is read,
+	// so an oversized frame costs nothing to reject. Written as a subtraction
+	// rather than len(r.buf)+ln so that a large declared length cannot overflow
+	// the addition on the way to the comparison.
+	if r.limits.MaxCommandBytes > 0 && ln > r.limits.MaxCommandBytes-len(r.buf) {
+		return protoErr("command exceeds limit")
 	}
 
 	start := len(r.buf)
