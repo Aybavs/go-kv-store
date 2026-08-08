@@ -224,7 +224,8 @@ The supervisor broadcasts by closing a channel rather than delivering a value.
 A delivered value can be received exactly once, which is how a fatal raised
 during a graceful shutdown was lost: the shutdown path had already committed to
 its own case and nothing read the channel again, so the process exited zero
-after an invariant violation.
+after an invariant violation. See
+[ADR 0003](design-decisions/0003-fatal-conditions-are-broadcast.md).
 
 ## Testing strategy
 
