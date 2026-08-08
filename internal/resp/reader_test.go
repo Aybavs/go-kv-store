@@ -5,6 +5,8 @@ import (
 	"errors"
 	"io"
 	"reflect"
+	"strconv"
+	"strings"
 	"testing"
 	"testing/iotest"
 )
@@ -184,6 +186,179 @@ func TestReadCommandLimits(t *testing.T) {
 			t.Fatalf("got %q, want %q", args, want)
 		}
 	})
+}
+
+// TestReadCommandTotalSizeLimit covers the limit that bounds the product of the
+// other two. Each element below is well inside MaxBulkLength and the element
+// count is well inside MaxArrayElements, so nothing here is caught by the
+// per-element limits — which is exactly the gap: without a total, 1024
+// arguments of 64 MiB is a 64 GiB frame that both per-element limits accept.
+func TestReadCommandTotalSizeLimit(t *testing.T) {
+	// Room for 10 payload bytes in total, with neither per-element limit in
+	// the way.
+	total := Limits{MaxArrayElements: 16, MaxBulkLength: 64, MaxCommandBytes: 10}
+
+	frame := func(args ...string) []byte {
+		var b []byte
+		b = append(b, []byte("*"+strconv.Itoa(len(args))+"\r\n")...)
+		for _, a := range args {
+			b = append(b, []byte("$"+strconv.Itoa(len(a))+"\r\n"+a+"\r\n")...)
+		}
+		return b
+	}
+
+	t.Run("sum over the limit is refused", func(t *testing.T) {
+		// 4 x 3 bytes = 12 > 10, but every element is far below MaxBulkLength.
+		r := NewReader(bytes.NewReader(frame("aaa", "bbb", "ccc", "ddd")), total)
+		_, err := r.ReadCommand()
+		var pe *ProtocolError
+		if !errors.As(err, &pe) {
+			t.Fatalf("want *ProtocolError, got %#v", err)
+		}
+	})
+
+	t.Run("sum exactly at the limit is accepted", func(t *testing.T) {
+		r := NewReader(bytes.NewReader(frame("aaaaa", "bbbbb")), total) // 10
+		args, err := r.ReadCommand()
+		if err != nil {
+			t.Fatalf("ReadCommand: %v", err)
+		}
+		want := [][]byte{[]byte("aaaaa"), []byte("bbbbb")}
+		if !reflect.DeepEqual(args, want) {
+			t.Fatalf("got %q, want %q", args, want)
+		}
+	})
+
+	t.Run("one byte over the limit is refused", func(t *testing.T) {
+		r := NewReader(bytes.NewReader(frame("aaaaa", "bbbbbb")), total) // 11
+		_, err := r.ReadCommand()
+		var pe *ProtocolError
+		if !errors.As(err, &pe) {
+			t.Fatalf("want *ProtocolError, got %#v", err)
+		}
+	})
+
+	// The rejection must happen on the declared length, before the payload is
+	// read. Otherwise the limit bounds nothing: the bytes it is meant to keep
+	// out have already been buffered by the time it fires. The reader is given
+	// a header promising 1 MiB and nothing else at all, so a decoder that reads
+	// first cannot return a protocol error — it can only block or report a
+	// truncated stream.
+	t.Run("refused before the payload is read", func(t *testing.T) {
+		// MaxBulkLength is deliberately huge here so that it cannot be the
+		// check that fires; only the total can reject this frame.
+		roomy := Limits{MaxArrayElements: 16, MaxBulkLength: 1 << 30, MaxCommandBytes: 10}
+		header := []byte("*1\r\n$1048576\r\n")
+		r := NewReader(bytes.NewReader(header), roomy)
+		_, err := r.ReadCommand()
+		var pe *ProtocolError
+		if !errors.As(err, &pe) {
+			t.Fatalf("want *ProtocolError, got %#v", err)
+		}
+		if !strings.Contains(pe.Msg, "command exceeds limit") {
+			t.Fatalf("got %q, want the total-size limit to fire, not a truncation error", pe.Msg)
+		}
+	})
+
+	t.Run("zero disables the check", func(t *testing.T) {
+		off := Limits{MaxArrayElements: 16, MaxBulkLength: 64, MaxCommandBytes: 0}
+		r := NewReader(bytes.NewReader(frame("aaa", "bbb", "ccc", "ddd")), off)
+		if _, err := r.ReadCommand(); err != nil {
+			t.Fatalf("ReadCommand with the check disabled: %v", err)
+		}
+	})
+}
+
+// TestReaderReleasesOversizedBuffer pins that a connection does not carry the
+// peak of one large command for the rest of its life. MaxCommandBytes bounds
+// what a single command may allocate; this bounds what a connection may park.
+// Without it a client sends one maximum-size command, then sits idle holding
+// that memory, and the limit bounds far less than it appears to.
+func TestReaderReleasesOversizedBuffer(t *testing.T) {
+	big := strings.Repeat("z", 4*maxRetainedBuffer)
+	frame := "*1\r\n$" + strconv.Itoa(len(big)) + "\r\n" + big + "\r\n"
+	small := "*1\r\n$4\r\nPING\r\n"
+
+	r := NewReader(strings.NewReader(frame+small+small), Limits{
+		MaxArrayElements: 16,
+		MaxBulkLength:    1 << 30,
+		MaxCommandBytes:  1 << 30,
+	})
+
+	if _, err := r.ReadCommand(); err != nil {
+		t.Fatalf("large command: %v", err)
+	}
+	grown := cap(r.buf)
+	if grown < len(big) {
+		t.Fatalf("buffer capacity %d did not grow to hold the %d-byte argument", grown, len(big))
+	}
+
+	// The next decode is where the release happens: the slices handed out for
+	// the command above stay valid until then.
+	args, err := r.ReadCommand()
+	if err != nil {
+		t.Fatalf("following small command: %v", err)
+	}
+	if string(args[0]) != "PING" {
+		t.Fatalf("got %q, want PING", args[0])
+	}
+	if cap(r.buf) > maxRetainedBuffer {
+		t.Fatalf("buffer still holds %d bytes after a small command, want at most %d",
+			cap(r.buf), maxRetainedBuffer)
+	}
+
+	// Decoding must still work after the release, not just be smaller.
+	args, err = r.ReadCommand()
+	if err != nil {
+		t.Fatalf("second small command after release: %v", err)
+	}
+	if string(args[0]) != "PING" {
+		t.Fatalf("got %q, want PING", args[0])
+	}
+}
+
+// TestReaderKeepsOrdinaryBuffer is the other half: the release must not throw
+// away the reuse that ordinary traffic depends on, or every command would
+// allocate a fresh buffer.
+func TestReaderKeepsOrdinaryBuffer(t *testing.T) {
+	frames := strings.Repeat("*3\r\n$3\r\nSET\r\n$5\r\nmykey\r\n$7\r\nmyvalue\r\n", 3)
+	r := NewReader(strings.NewReader(frames), DefaultLimits())
+
+	if _, err := r.ReadCommand(); err != nil {
+		t.Fatalf("first command: %v", err)
+	}
+	first := cap(r.buf)
+	if first == 0 {
+		t.Fatal("buffer was not allocated at all")
+	}
+	for i := 2; i <= 3; i++ {
+		if _, err := r.ReadCommand(); err != nil {
+			t.Fatalf("command %d: %v", i, err)
+		}
+		if cap(r.buf) != first {
+			t.Fatalf("command %d reallocated an ordinary-sized buffer: cap %d, want %d",
+				i, cap(r.buf), first)
+		}
+	}
+}
+
+// TestDefaultLimitsBoundTheProduct pins the relationship between the defaults
+// rather than their values: whatever they are, the total must not be reachable
+// by multiplying the other two, and must still admit one maximum-size value.
+func TestDefaultLimitsBoundTheProduct(t *testing.T) {
+	l := DefaultLimits()
+
+	if l.MaxCommandBytes <= 0 {
+		t.Fatal("MaxCommandBytes must be set in DefaultLimits, or the server has no total bound")
+	}
+	if l.MaxCommandBytes >= l.MaxArrayElements*l.MaxBulkLength {
+		t.Fatalf("MaxCommandBytes (%d) does not bound MaxArrayElements*MaxBulkLength (%d)",
+			l.MaxCommandBytes, l.MaxArrayElements*l.MaxBulkLength)
+	}
+	if l.MaxCommandBytes <= l.MaxBulkLength {
+		t.Fatalf("MaxCommandBytes (%d) leaves no room for a maximum-size bulk (%d) plus its key and command name",
+			l.MaxCommandBytes, l.MaxBulkLength)
+	}
 }
 
 // failingReader delivers data and then fails with a transport error, the way a

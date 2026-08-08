@@ -33,6 +33,7 @@ func run() error {
 		shutdownTimeout = flag.Duration("shutdown-timeout", 10*time.Second, "graceful shutdown budget")
 		maxBulk         = flag.Int("max-bulk-length", 64<<20, "maximum bulk string length in bytes")
 		maxArgs         = flag.Int("max-array-elements", 1024, "maximum arguments per command")
+		maxCommand      = flag.Int("max-command-bytes", 128<<20, "maximum total argument bytes in one command")
 		logLevel        = flag.String("loglevel", "info", "log level: debug, info, warn, error")
 	)
 	flag.Parse()
@@ -48,7 +49,11 @@ func run() error {
 	cfg.MaxClients = *maxClients
 	cfg.ReadTimeout = *timeout
 	cfg.ShutdownTimeout = *shutdownTimeout
-	cfg.Limits = resp.Limits{MaxArrayElements: *maxArgs, MaxBulkLength: *maxBulk}
+	cfg.Limits = resp.Limits{
+		MaxArrayElements: *maxArgs,
+		MaxBulkLength:    *maxBulk,
+		MaxCommandBytes:  *maxCommand,
+	}
 
 	// The supervisor is created first so the engine can report fatal
 	// conditions into it without a dependency cycle.

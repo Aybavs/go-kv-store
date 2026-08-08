@@ -6,6 +6,30 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-08-08
+
+### Fixed
+
+- **Unbounded memory growth from a single connection.** `-max-array-elements`
+  and `-max-bulk-length` each bounded one dimension of a request and multiplied
+  without anything bounding their product, so the defaults permitted a 64 GiB
+  frame. Measured before the fix: one connection sending a 300 MiB request it
+  never completed drove resident memory from 5 MB to 1.09 GB. A new
+  `-max-command-bytes` limit (default 128 MiB) bounds the total, checked against
+  each declared length before any payload is read
+- A decode buffer grown past 1 MiB by one large request is now released when
+  that request completes. It was resliced to zero length and its capacity kept
+  for the life of the connection, so a client could send one large request and
+  then park that memory while idle
+
+### Added
+
+- `-max-command-bytes` flag, and `MaxCommandBytes` in `resp.Limits`. Setting it
+  to 0 disables the check
+- `SECURITY.md` now states what the request limits do and do not bound, with
+  measured numbers: peak memory is roughly three times the configured value, and
+  the bound is per connection rather than per server
+
 ## [0.1.0] - 2026-08-08
 
 ### Added

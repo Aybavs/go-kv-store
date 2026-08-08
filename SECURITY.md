@@ -10,8 +10,35 @@ networking internals. Do not expose it to an untrusted network.
 - No authentication and no TLS. Anyone who can reach the port has full access.
 - No per-client memory accounting; a client may hold a large output buffer.
 - The dataset must fit in memory; there is no eviction policy.
-- Frame size limits and a client limit exist and are configurable, but they have
-  not been audited against a determined attacker.
+- Request size limits exist and are configurable, but they have not been audited
+  against a determined attacker. What they do and do not bound is described
+  below, with measured numbers rather than estimates.
+
+## Request memory bounds
+
+`-max-command-bytes` (default 128 MiB) bounds the total argument bytes of one
+request. It is the limit that decides how much a single connection can make the
+server hold at once: `-max-array-elements` and `-max-bulk-length` each bound one
+dimension and multiply without it, so their defaults alone permit a 64 GiB
+frame. The check runs against each declared length before any payload is read,
+so an oversized request is refused rather than buffered.
+
+Two things it does not do, both measured on an Apple M4:
+
+- **Peak memory is about three times the configured value**, not equal to it.
+  Rejecting a request at the 128 MiB default peaked at 417 MB resident, because
+  the decode buffer grows by doubling and the previous array is still live while
+  it is copied.
+- **It bounds one connection, not the server.** With `-max-clients` at its
+  default of 1024, the worst case is that figure multiplied by the client limit.
+  Lower both flags together if the server is reachable by untrusted clients.
+
+A connection does not keep the peak after the request that caused it: a decode
+buffer above 1 MiB is released once its command completes, so a client cannot
+send one large request and then park that memory while idle.
+
+Setting `-max-command-bytes` to 0 disables the check and restores the unbounded
+behaviour. Do not do this on an untrusted network.
 
 ## Reporting
 
