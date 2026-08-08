@@ -28,8 +28,11 @@ type Registry struct {
 
 func New(e *engine.Engine) *Registry {
 	r := &Registry{engine: e, cmds: make(map[string]spec)}
-	r.cmds["PING"] = spec{minArgs: 1, maxArgs: 1, run: cmdPing}
-	r.cmds["SET"] = spec{minArgs: 3, maxArgs: 3, run: cmdSet}
+	r.cmds["PING"] = spec{minArgs: 1, maxArgs: 2, run: cmdPing}
+	// SET is deliberately unbounded above 3, matching Redis's -3 arity. The
+	// arguments past the value are options, and rejecting an unsupported one is
+	// cmdSet's job, not the arity check's — see cmdSet.
+	r.cmds["SET"] = spec{minArgs: 3, maxArgs: -1, run: cmdSet}
 	r.cmds["GET"] = spec{minArgs: 2, maxArgs: 2, run: cmdGet}
 	r.cmds["DEL"] = spec{minArgs: 2, maxArgs: -1, run: cmdDel}
 	r.cmds["EXISTS"] = spec{minArgs: 2, maxArgs: -1, run: cmdExists}
@@ -45,12 +48,35 @@ func (r *Registry) Dispatch(args [][]byte) Reply {
 	name := strings.ToUpper(string(args[0]))
 	sp, ok := r.cmds[name]
 	if !ok {
-		return Err("ERR unknown command '" + name + "'")
+		// Redis echoes the name exactly as the client sent it here, casing and
+		// all, because there is no canonical form for a command it does not
+		// know. We match that.
+		return Err("ERR unknown command '" + echoName(args[0]) + "'")
 	}
 	if len(args) < sp.minArgs || (sp.maxArgs >= 0 && len(args) > sp.maxArgs) {
-		return Err("ERR wrong number of arguments for '" + name + "' command")
+		// The command is known, so there is a canonical form. Redis uses it,
+		// lowercased, rather than repeating the client's casing.
+		return Err("ERR wrong number of arguments for '" + strings.ToLower(name) + "' command")
 	}
 	return sp.run(r.engine, args)
+}
+
+// maxEchoedName bounds how much of an unknown command name is quoted back to
+// the client. A name may be as long as the configured bulk-string limit — 64
+// MiB by default — and reflecting one of those in full would let a client
+// amplify a single request into a reply of its own choosing. Redis bounds the
+// same text for the same reason.
+const maxEchoedName = 128
+
+// echoName renders a client-supplied command name for an error reply. The
+// result is a bounded byte string, not necessarily valid UTF-8: truncation is
+// applied at a byte offset and the name itself may be arbitrary binary. The
+// encoder neutralises CR and LF, so no content here can affect framing.
+func echoName(b []byte) string {
+	if len(b) > maxEchoedName {
+		return string(b[:maxEchoedName]) + "..."
+	}
+	return string(b)
 }
 
 // mutationError maps engine mutation failures to client-visible replies.
@@ -61,11 +87,28 @@ func mutationError(err error) Reply {
 	return Err("ERR internal error")
 }
 
-func cmdPing(_ *engine.Engine, _ [][]byte) Reply { return Simple("PONG") }
+// cmdPing answers PONG, or echoes the optional message as a bulk string, as
+// Redis does. The conversion to string copies the borrowed bytes.
+func cmdPing(_ *engine.Engine, args [][]byte) Reply {
+	if len(args) == 2 {
+		return Bulk(string(args[1]))
+	}
+	return Simple("PONG")
+}
 
 // cmdSet converts the borrowed key and value bytes into owned strings. This is
 // the ownership boundary: nothing beyond this point aliases the parser buffer.
+//
+// Anything past the value is an option. v0.1 implements none, so every one of
+// them is a syntax error — the same answer Redis gives to an option it does not
+// recognise, and a more accurate one than a wrong-arity complaint: a client
+// sending "SET k v EX 10" has the right number of arguments by Redis's rules
+// and would be misled by being told otherwise. v0.2 replaces this rejection
+// with the EX/PX parser rather than reworking the arity.
 func cmdSet(e *engine.Engine, args [][]byte) Reply {
+	if len(args) > 3 {
+		return Err("ERR syntax error")
+	}
 	key, value := string(args[1]), string(args[2])
 	if err := e.Set(key, value); err != nil {
 		return mutationError(err)

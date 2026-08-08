@@ -1,0 +1,89 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test (Linux)
+    runs-on: ubuntu-latest
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      REDIS_ADDR: 127.0.0.1:6379
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+          check-latest: true
+
+      - name: gofmt
+        run: |
+          files="$(gofmt -l .)"
+          if [ -n "$files" ]; then
+            echo "gofmt found unformatted files:"; echo "$files"; exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: staticcheck
+        run: go run honnef.co/go/tools/cmd/staticcheck@latest ./...
+
+      - name: build
+        run: go build ./...
+
+      - name: test
+        run: go test ./...
+
+      # Run separately from `go test`: the race detector changes scheduling, and
+      # a failure here should be reported as a race, not as a rerun of the same
+      # suite. Conformance runs under it too, so the differential comparison is
+      # made against a racy build as well.
+      - name: test with race detector
+        run: go test -race ./...
+
+      # The conformance suite skips silently when REDIS_ADDR is unset, which is
+      # the behaviour we want locally and a trap in CI: a misconfigured service
+      # container would turn the whole differential comparison into a no-op that
+      # still reports success. Fail if it did not actually run.
+      - name: verify conformance actually ran
+        run: |
+          out="$(go test -v -count=1 -run 'TestDifferentialAgainstRedis' ./internal/conformance/)"
+          echo "$out"
+          if echo "$out" | grep -q 'SKIP'; then
+            echo "::error::conformance skipped — REDIS_ADDR is not reaching the test"
+            exit 1
+          fi
+
+      - name: fuzz seed corpus
+        run: go test ./internal/resp/ -run=Fuzz
+
+  portability:
+    name: Build and test (macOS)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+          check-latest: true
+      - run: go build ./...
+      # Conformance needs Redis and stays on Linux; this job checks that the
+      # server builds and its own tests pass on Darwin. The conformance package
+      # is compiled here and skips at run time.
+      - run: go test ./internal/...

@@ -136,12 +136,30 @@ func TestNewRejectsNilOnFatal(t *testing.T) {
 // since a Set admitted before the drain could read the flag after it. It
 // asserts instead that every outcome is consistent with what the engine
 // reported, and that the gate is final once writers stop.
+// TestBeginDrainUnderContention drains while writers are mid-flight and
+// requires every outcome to be consistent with what the store ends up holding:
+// an admitted mutation is present, a refused one is absent.
+//
+// The overlap is constructed rather than hoped for. An earlier version gave
+// each writer a fixed number of mutations and drained once they had all
+// signalled that they had started; on a runner with few cores every writer
+// could finish before the drain was called, and the test failed reporting that
+// it had never exercised the property. It passed locally and failed in CI,
+// which is the signature of a test that depends on winning a race.
+//
+// Here a writer runs until it is refused, and the drain happens only after
+// every writer has had a mutation admitted. So at the moment of the drain all
+// of them are still looping, and because the gate is final each one is refused
+// exactly once afterwards. Both counts are therefore determined, not sampled.
 func TestBeginDrainUnderContention(t *testing.T) {
 	e := newTestEngine(t)
 
 	const (
-		writers   = 8
-		perWriter = 200
+		writers = 8
+		// Safety valve only. A writer leaves this loop when it is refused,
+		// which the drain guarantees; the cap exists so that a gate which never
+		// closes fails the test instead of hanging it.
+		maxPerWriter = 1 << 20
 	)
 
 	type outcome struct {
@@ -149,59 +167,74 @@ func TestBeginDrainUnderContention(t *testing.T) {
 		admitted bool
 	}
 
-	started := make(chan struct{}, writers)
-	results := make(chan outcome, writers*perWriter)
+	firstAdmit := make(chan struct{}, writers)
+	results := make([][]outcome, writers)
 
 	var wg sync.WaitGroup
 	for i := 0; i < writers; i++ {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			started <- struct{}{}
-			for j := 0; j < perWriter; j++ {
+			var out []outcome
+			defer func() { results[i] = out }()
+
+			signalled := false
+			for j := 0; j < maxPerWriter; j++ {
 				key := fmt.Sprintf("k%d-%d", i, j)
 				err := e.Set(key, "v")
 				switch {
 				case err == nil:
-					results <- outcome{key: key, admitted: true}
+					out = append(out, outcome{key: key, admitted: true})
+					if !signalled {
+						signalled = true
+						firstAdmit <- struct{}{}
+					}
 				case errors.Is(err, ErrDraining):
-					results <- outcome{key: key, admitted: false}
+					out = append(out, outcome{key: key, admitted: false})
+					return // the gate is final: no later attempt could succeed
 				default:
 					t.Errorf("unexpected error from Set: %v", err)
 					return
 				}
 			}
+			t.Errorf("writer %d reached the iteration cap without ever being refused", i)
 		}(i)
 	}
 
-	// Drain only once every writer is actually running, so the gate is exercised
-	// against in-flight mutations rather than before any have begun.
+	// Every writer has now had a mutation admitted, so every writer is still
+	// inside its loop. Draining here is what puts the gate in their path.
 	for i := 0; i < writers; i++ {
-		<-started
+		<-firstAdmit
 	}
 	e.BeginDrain()
 
 	wg.Wait()
-	close(results)
 
 	admitted, refused := 0, 0
-	for r := range results {
-		_, present := e.Get(r.key)
-		if r.admitted {
-			admitted++
-			if !present {
-				t.Fatalf("Set(%q) reported success but the key is absent", r.key)
-			}
-		} else {
-			refused++
-			if present {
-				t.Fatalf("Set(%q) reported ErrDraining but the key is present", r.key)
+	for _, out := range results {
+		for _, r := range out {
+			_, present := e.Get(r.key)
+			if r.admitted {
+				admitted++
+				if !present {
+					t.Fatalf("Set(%q) reported success but the key is absent", r.key)
+				}
+			} else {
+				refused++
+				if present {
+					t.Fatalf("Set(%q) reported ErrDraining but the key is present", r.key)
+				}
 			}
 		}
 	}
 
-	if refused == 0 {
-		t.Fatal("no mutation was refused; the drain never overlapped the writers")
+	// Exact, not "at least one": each writer was mid-loop when the drain landed
+	// and the gate never reopens, so each contributes precisely one refusal.
+	if refused != writers {
+		t.Fatalf("refused = %d, want %d (one per writer)", refused, writers)
+	}
+	if admitted < writers {
+		t.Fatalf("admitted = %d, want at least %d (one per writer before the drain)", admitted, writers)
 	}
 
 	// Finality: the gate does not reopen.

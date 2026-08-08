@@ -1,6 +1,7 @@
 package command
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/aybavs/go-kv-store/internal/engine"
@@ -37,25 +38,119 @@ func TestCommandNameIsCaseInsensitive(t *testing.T) {
 	}
 }
 
-func TestUnknownCommand(t *testing.T) {
+// TestPingWithMessage pins PING's optional message. Redis answers a bare PING
+// with the status PONG and a PING carrying one argument with that argument as a
+// bulk string; the two reply types are not interchangeable to a client.
+func TestPingWithMessage(t *testing.T) {
 	r, _ := newTestRegistry(t)
-	got := r.Dispatch(args("NOPE", "x"))
-	if got.Kind != ReplyError {
-		t.Fatalf("got %+v, want error reply", got)
+
+	got := r.Dispatch(args("PING", "hello"))
+	if got.Kind != ReplyBulk {
+		t.Fatalf("got %+v, want bulk reply", got)
 	}
-	if want := "ERR unknown command 'NOPE'"; got.Str != want {
-		t.Fatalf("got %q, want %q", got.Str, want)
+	if got.Str != "hello" {
+		t.Fatalf("got %q, want %q", got.Str, "hello")
+	}
+
+	// The message is binary-safe and is not interpreted.
+	if got := r.Dispatch(args("PING", "a\x00\r\nb")); got.Str != "a\x00\r\nb" {
+		t.Fatalf("binary message: got %q", got.Str)
+	}
+
+	// Two arguments is still wrong arity: the message is optional, not variadic.
+	if got := r.Dispatch(args("PING", "a", "b")); got.Kind != ReplyError {
+		t.Fatalf("PING a b = %+v, want error reply", got)
 	}
 }
 
-func TestWrongArity(t *testing.T) {
+// TestSetRejectsOptions pins the arity/option split. v0.1 implements no SET
+// options, and the argument count for "SET k v EX 10" is legal by Redis's
+// rules, so the rejection must name the real problem rather than blaming the
+// count. v0.2 turns this branch into the option parser.
+func TestSetRejectsOptions(t *testing.T) {
+	r, e := newTestRegistry(t)
+
+	for _, extra := range [][]string{{"extra"}, {"EX", "10"}, {"NX"}, {"KEEPTTL"}} {
+		call := append([]string{"SET", "k", "v"}, extra...)
+		got := r.Dispatch(args(call...))
+		if got.Kind != ReplyError {
+			t.Fatalf("SET with %v: got %+v, want error reply", extra, got)
+		}
+		if want := "ERR syntax error"; got.Str != want {
+			t.Fatalf("SET with %v: got %q, want %q", extra, got.Str, want)
+		}
+	}
+
+	// A rejected SET must not have written anything.
+	if _, ok := e.Get("k"); ok {
+		t.Fatal("a rejected SET stored the key anyway")
+	}
+
+	// Two arguments is still wrong arity, not a syntax error: nothing has been
+	// supplied to misinterpret as an option.
+	got := r.Dispatch(args("SET", "k"))
+	if want := "ERR wrong number of arguments for 'set' command"; got.Str != want {
+		t.Fatalf("SET k: got %q, want %q", got.Str, want)
+	}
+}
+
+// TestUnknownCommand pins the two halves of the error-casing contract that
+// docs/protocol.md documents: an unknown name is echoed exactly as the client
+// sent it, because there is no canonical form for a command we do not know.
+func TestUnknownCommand(t *testing.T) {
 	r, _ := newTestRegistry(t)
-	got := r.Dispatch(args("PING", "extra"))
+	for _, sent := range []string{"NOPE", "nope", "NoPe"} {
+		t.Run(sent, func(t *testing.T) {
+			got := r.Dispatch(args(sent, "x"))
+			if got.Kind != ReplyError {
+				t.Fatalf("got %+v, want error reply", got)
+			}
+			if want := "ERR unknown command '" + sent + "'"; got.Str != want {
+				t.Fatalf("got %q, want %q", got.Str, want)
+			}
+		})
+	}
+}
+
+// TestUnknownCommandNameIsBounded pins the amplification bound. A name may be
+// as long as the bulk-string limit; only a bounded prefix comes back.
+func TestUnknownCommandNameIsBounded(t *testing.T) {
+	r, _ := newTestRegistry(t)
+	long := strings.Repeat("Z", maxEchoedName*4)
+
+	got := r.Dispatch(args(long))
 	if got.Kind != ReplyError {
 		t.Fatalf("got %+v, want error reply", got)
 	}
-	if want := "ERR wrong number of arguments for 'PING' command"; got.Str != want {
-		t.Fatalf("got %q, want %q", got.Str, want)
+	want := "ERR unknown command '" + strings.Repeat("Z", maxEchoedName) + "...'"
+	if got.Str != want {
+		t.Fatalf("got %d bytes %q, want %d bytes", len(got.Str), got.Str, len(want))
+	}
+
+	// A name exactly at the bound is quoted whole, with no ellipsis.
+	exact := strings.Repeat("Z", maxEchoedName)
+	if got := r.Dispatch(args(exact)); got.Str != "ERR unknown command '"+exact+"'" {
+		t.Fatalf("name of exactly maxEchoedName bytes was altered: %q", got.Str)
+	}
+}
+
+// TestWrongArity pins the other half: the command is known, so it has a
+// canonical form, and Redis reports that lowercased rather than repeating the
+// client's casing.
+func TestWrongArity(t *testing.T) {
+	r, _ := newTestRegistry(t)
+	// PING takes an optional message, so two arguments is a legal call; three
+	// is not.
+	for _, sent := range []string{"PING", "ping", "PiNg"} {
+		t.Run(sent, func(t *testing.T) {
+			got := r.Dispatch(args(sent, "a", "b"))
+			if got.Kind != ReplyError {
+				t.Fatalf("got %+v, want error reply", got)
+			}
+			if want := "ERR wrong number of arguments for 'ping' command"; got.Str != want {
+				t.Fatalf("got %q, want %q", got.Str, want)
+			}
+		})
 	}
 }
 
