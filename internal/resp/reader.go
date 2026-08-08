@@ -80,6 +80,17 @@ func NewReader(r io.Reader, limits Limits) *Reader {
 	}
 }
 
+// Buffered reports how many bytes have been read from the underlying reader but
+// not yet turned into a decoded frame.
+//
+// A caller that also counts what the underlying reader delivered can subtract
+// the two to get the exact offset of the last complete frame — which is what
+// recovery needs to truncate a torn tail at the right place. Note this is a
+// different question from the one Buffered cannot answer for the connection
+// handler: "how many bytes are left over" is exact, while "is a complete next
+// command pending" is not.
+func (r *Reader) Buffered() int { return r.br.Buffered() }
+
 // ReadCommand reads one request frame: a RESP2 array of bulk strings. The
 // returned slices point into a buffer the next call reuses; copy what you keep.
 //
