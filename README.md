@@ -76,10 +76,13 @@ With Docker:
 | Command | Reply |
 |---|---|
 | `PING [message]` | `PONG`, or the message |
-| `SET key value` | `OK` |
+| `SET key value [EX s \| PX ms]` | `OK` |
 | `GET key` | value, or nil if absent |
 | `DEL key [key ...]` | number of keys removed |
 | `EXISTS key [key ...]` | number of keys present |
+| `EXPIRE key seconds` | `1` if applied, `0` if no such key |
+| `TTL key` | seconds left, `-1` no TTL, `-2` no key |
+| `PERSIST key` | `1` if a TTL was removed, `0` otherwise |
 
 Full wire format, error classes and the deviations from Redis are in
 [docs/protocol.md](docs/protocol.md).
@@ -129,7 +132,7 @@ Stated plainly rather than buried:
 - **Single node.** No replication, no clustering.
 - **No authentication, no TLS.** Anyone who can reach the port has full access.
 - **No persistence yet.** All data is lost on restart until v0.3.
-- **No expiration yet.** `EX`, `TTL` and `EXPIRE` arrive in v0.2.
+- **Expiration is per-key only.** No eviction policy and no maxmemory.
 - **Strings only.** No List, Hash or Set.
 - **No transactions, no Pub/Sub, no `MSET`.**
 - **The dataset must fit in memory.** There is no eviction policy.
