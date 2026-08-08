@@ -18,8 +18,12 @@ lint:
 	@test -z "$$(gofmt -l .)" || (echo "gofmt found issues:"; gofmt -l .; exit 1)
 	go vet ./...
 
+# -run='^$$' keeps the test suite out of a benchmark run. Without it every
+# package's tests execute first and their output is interleaved with the
+# numbers, which makes the result awkward to record verbatim in
+# docs/benchmarks.md.
 bench:
-	go test -bench=. -benchmem ./...
+	go test -bench=. -benchmem -run='^$$' ./...
 
 clean:
 	rm -rf bin
