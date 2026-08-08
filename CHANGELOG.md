@@ -6,6 +6,12 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Crash-durability tests that kill a real server process at random moments and
+  restart it against the file left on disk, asserting that every acknowledged
+  write survives and that the recovered keys form a contiguous prefix
+
 ## [0.3.0] - 2026-08-09
 
 Persistence. Data survives a restart when `--appendonly` is on; it is off by
