@@ -188,11 +188,9 @@ func TestReadCommandLimits(t *testing.T) {
 	})
 }
 
-// TestReadCommandTotalSizeLimit covers the limit that bounds the product of the
-// other two. Each element below is well inside MaxBulkLength and the element
-// count is well inside MaxArrayElements, so nothing here is caught by the
-// per-element limits — which is exactly the gap: without a total, 1024
-// arguments of 64 MiB is a 64 GiB frame that both per-element limits accept.
+// Every frame below sits well inside both per-element limits, so only the total
+// can reject it — which is the gap: 1024 arguments of 64 MiB is a 64 GiB frame
+// that both per-element limits accept.
 func TestReadCommandTotalSizeLimit(t *testing.T) {
 	// Room for 10 payload bytes in total, with neither per-element limit in
 	// the way.
@@ -238,12 +236,9 @@ func TestReadCommandTotalSizeLimit(t *testing.T) {
 		}
 	})
 
-	// The rejection must happen on the declared length, before the payload is
-	// read. Otherwise the limit bounds nothing: the bytes it is meant to keep
-	// out have already been buffered by the time it fires. The reader is given
-	// a header promising 1 MiB and nothing else at all, so a decoder that reads
-	// first cannot return a protocol error — it can only block or report a
-	// truncated stream.
+	// Must reject on the declared length, or the limit bounds nothing: the bytes
+	// are already buffered by the time it fires. Only a header is supplied, so a
+	// decoder that reads first can only block or report a truncated stream.
 	t.Run("refused before the payload is read", func(t *testing.T) {
 		// MaxBulkLength is deliberately huge here so that it cannot be the
 		// check that fires; only the total can reject this frame.
@@ -269,11 +264,9 @@ func TestReadCommandTotalSizeLimit(t *testing.T) {
 	})
 }
 
-// TestReaderReleasesOversizedBuffer pins that a connection does not carry the
-// peak of one large command for the rest of its life. MaxCommandBytes bounds
-// what a single command may allocate; this bounds what a connection may park.
-// Without it a client sends one maximum-size command, then sits idle holding
-// that memory, and the limit bounds far less than it appears to.
+// MaxCommandBytes bounds what one command may allocate; this bounds what a
+// connection may park. Without it a client sends one maximum-size command, then
+// sits idle holding that memory.
 func TestReaderReleasesOversizedBuffer(t *testing.T) {
 	big := strings.Repeat("z", 4*maxRetainedBuffer)
 	frame := "*1\r\n$" + strconv.Itoa(len(big)) + "\r\n" + big + "\r\n"
@@ -317,9 +310,7 @@ func TestReaderReleasesOversizedBuffer(t *testing.T) {
 	}
 }
 
-// TestReaderKeepsOrdinaryBuffer is the other half: the release must not throw
-// away the reuse that ordinary traffic depends on, or every command would
-// allocate a fresh buffer.
+// The other half: the release must not cost ordinary traffic its buffer reuse.
 func TestReaderKeepsOrdinaryBuffer(t *testing.T) {
 	frames := strings.Repeat("*3\r\n$3\r\nSET\r\n$5\r\nmykey\r\n$7\r\nmyvalue\r\n", 3)
 	r := NewReader(strings.NewReader(frames), DefaultLimits())

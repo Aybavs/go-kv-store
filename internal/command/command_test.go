@@ -38,9 +38,8 @@ func TestCommandNameIsCaseInsensitive(t *testing.T) {
 	}
 }
 
-// TestPingWithMessage pins PING's optional message. Redis answers a bare PING
-// with the status PONG and a PING carrying one argument with that argument as a
-// bulk string; the two reply types are not interchangeable to a client.
+// Redis answers a bare PING with the status PONG and PING <msg> with a bulk
+// string. The two reply types are not interchangeable to a client.
 func TestPingWithMessage(t *testing.T) {
 	r, _ := newTestRegistry(t)
 
@@ -63,10 +62,8 @@ func TestPingWithMessage(t *testing.T) {
 	}
 }
 
-// TestSetRejectsOptions pins the arity/option split. v0.1 implements no SET
-// options, and the argument count for "SET k v EX 10" is legal by Redis's
-// rules, so the rejection must name the real problem rather than blaming the
-// count. v0.2 turns this branch into the option parser.
+// The argument count for "SET k v EX 10" is legal by Redis's rules, so the
+// rejection must name the option rather than blame the count.
 func TestSetRejectsOptions(t *testing.T) {
 	r, e := newTestRegistry(t)
 
@@ -94,9 +91,8 @@ func TestSetRejectsOptions(t *testing.T) {
 	}
 }
 
-// TestUnknownCommand pins the two halves of the error-casing contract that
-// docs/protocol.md documents: an unknown name is echoed exactly as the client
-// sent it, because there is no canonical form for a command we do not know.
+// An unknown name is echoed exactly as sent: there is no canonical form for a
+// command we do not know. See docs/protocol.md.
 func TestUnknownCommand(t *testing.T) {
 	r, _ := newTestRegistry(t)
 	for _, sent := range []string{"NOPE", "nope", "NoPe"} {
@@ -112,8 +108,7 @@ func TestUnknownCommand(t *testing.T) {
 	}
 }
 
-// TestUnknownCommandNameIsBounded pins the amplification bound. A name may be
-// as long as the bulk-string limit; only a bounded prefix comes back.
+// A name may be as long as the bulk-string limit; only a bounded prefix returns.
 func TestUnknownCommandNameIsBounded(t *testing.T) {
 	r, _ := newTestRegistry(t)
 	long := strings.Repeat("Z", maxEchoedName*4)
@@ -134,9 +129,7 @@ func TestUnknownCommandNameIsBounded(t *testing.T) {
 	}
 }
 
-// TestWrongArity pins the other half: the command is known, so it has a
-// canonical form, and Redis reports that lowercased rather than repeating the
-// client's casing.
+// The other half: a known command has a canonical form, reported lowercased.
 func TestWrongArity(t *testing.T) {
 	r, _ := newTestRegistry(t)
 	// PING takes an optional message, so two arguments is a legal call; three

@@ -8,13 +8,9 @@ import (
 	"github.com/aybavs/go-kv-store/internal/resp"
 )
 
-// TestStoredDataDoesNotAliasParserBuffer proves the ownership invariant
-// directly: after SET executes, we scribble over the exact bytes the parser
-// handed us. If the store retained those slices instead of copying, GET would
-// return corrupted data.
-//
-// The race detector cannot catch this class of bug — it is a single-goroutine
-// aliasing error — so it needs its own test.
+// Scribbles over the exact bytes the parser handed us after SET returns: if the
+// store kept those slices, GET returns corruption. Single-goroutine aliasing, so
+// the race detector cannot catch it.
 func TestStoredDataDoesNotAliasParserBuffer(t *testing.T) {
 	e := engine.New(func(err error) { t.Errorf("unexpected fatal: %v", err) })
 	r := New(e)

@@ -44,8 +44,7 @@ func (s *Server) handleConn(conn net.Conn) {
 			s.log.Debug("write failed", "err", err)
 			return
 		}
-		// Each completed command response is flushed. Batching is deliberately
-		// not attempted here; see spec §7.1.
+		// One flush per response; batching is deliberately not attempted here.
 		if err := w.Flush(); err != nil {
 			s.log.Debug("flush failed", "err", err)
 			return

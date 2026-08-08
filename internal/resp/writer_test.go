@@ -39,11 +39,9 @@ func TestWriterTypes(t *testing.T) {
 	}
 }
 
-// TestWriterLineRepliesCannotSplitFrames pins the reply-splitting defence. A
-// status or error line ends at the first CRLF, so a CR or LF carried in the
-// payload — error text quotes client-supplied data — would terminate the frame
-// early and turn the remainder into extra replies the client never asked for.
-// Each case below asserts exactly one CRLF, at the very end.
+// A status or error line ends at the first CRLF, so a CR or LF in the payload
+// would terminate the frame early and turn the rest into replies the client
+// never asked for. Each case asserts exactly one CRLF, at the end.
 func TestWriterLineRepliesCannotSplitFrames(t *testing.T) {
 	cases := []struct {
 		name string
@@ -107,9 +105,8 @@ func TestWriterLineRepliesCannotSplitFrames(t *testing.T) {
 	}
 }
 
-// TestWriterBulkPreservesCRLF is the other half of the contract: bulk strings
-// carry a length prefix, so CR and LF inside them are payload and must survive
-// the sanitising applied to line replies.
+// The other half: bulk strings are length-prefixed, so CR and LF inside them
+// are payload and must survive.
 func TestWriterBulkPreservesCRLF(t *testing.T) {
 	var buf bytes.Buffer
 	w := NewWriter(&buf)

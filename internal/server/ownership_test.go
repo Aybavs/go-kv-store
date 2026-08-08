@@ -29,12 +29,9 @@ func TestPipelinedSingleWrite(t *testing.T) {
 	}
 }
 
-// TestPipelinedLargeBatch pushes enough distinct commands in one write to
-// force the server's read buffer to refill mid-batch. Each iteration sets its
-// own key to its own value — a batch that wrote the same key/value 200 times
-// would pass identically whether or not the ownership invariant held, so a
-// sample of the keys is re-read afterward and must hold its own value, not
-// some other iteration's.
+// Enough distinct commands in one write to refill the read buffer mid-batch.
+// Each iteration uses its own key and value: repeating one pair would pass
+// whether or not the ownership invariant held.
 func TestPipelinedLargeBatch(t *testing.T) {
 	addr, _ := startServer(t, nil)
 	c := dial(t, addr)

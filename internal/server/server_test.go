@@ -261,18 +261,12 @@ func newBoundServer(t *testing.T) (*Server, *Supervisor, *bytes.Buffer) {
 	return srv, sup, &logs
 }
 
-// TestGracefulShutdownSurfacesPendingFatal is the regression test for the defect
-// this package's supervisor exists to prevent.
+// Regression test: a fatal delivered as a channel value could be received only
+// once, so once ctx.Done() won the select, nothing read the report and the
+// process exited 0 after an invariant violation.
 //
-// The supervisor used to deliver a fatal condition as a channel *value*, so it
-// could be received exactly once. RunWithReady's select commits to one branch;
-// once ctx.Done() won, gracefulShutdown ran and nothing ever read the report.
-// The process then logged "shutdown: complete" and exited 0 — claiming a clean
-// shutdown after an unrecoverable invariant violation. Closing a channel
-// broadcasts instead, and gracefulShutdown checks before it decides its return.
-//
-// The path is driven directly rather than through Run, because reaching it via
-// Run depends on which ready select case Go happens to pick.
+// Driven directly rather than through Run, which depends on which ready select
+// case Go happens to pick.
 func TestGracefulShutdownSurfacesPendingFatal(t *testing.T) {
 	srv, sup, logs := newBoundServer(t)
 	fatal := errors.New("engine invariant violated during shutdown")

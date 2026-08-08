@@ -126,39 +126,20 @@ func TestNewRejectsNilOnFatal(t *testing.T) {
 	New(nil)
 }
 
-// TestBeginDrainUnderContention exercises the admission gate the way shutdown
-// actually hits it: many in-flight writers while one goroutine drains. The
-// sequential test cannot show race-freedom, and this one is the -race target
-// for the gate.
+// TestBeginDrainUnderContention drains while writers are mid-flight: an
+// admitted mutation must be present afterwards, a refused one absent.
 //
-// It deliberately does not assert "nothing was admitted after BeginDrain
-// returned" by sampling a flag from the writers — that check would itself race,
-// since a Set admitted before the drain could read the flag after it. It
-// asserts instead that every outcome is consistent with what the engine
-// reported, and that the gate is final once writers stop.
-// TestBeginDrainUnderContention drains while writers are mid-flight and
-// requires every outcome to be consistent with what the store ends up holding:
-// an admitted mutation is present, a refused one is absent.
-//
-// The overlap is constructed rather than hoped for. An earlier version gave
-// each writer a fixed number of mutations and drained once they had all
-// signalled that they had started; on a runner with few cores every writer
-// could finish before the drain was called, and the test failed reporting that
-// it had never exercised the property. It passed locally and failed in CI,
-// which is the signature of a test that depends on winning a race.
-//
-// Here a writer runs until it is refused, and the drain happens only after
-// every writer has had a mutation admitted. So at the moment of the drain all
-// of them are still looping, and because the gate is final each one is refused
-// exactly once afterwards. Both counts are therefore determined, not sampled.
+// The overlap is constructed, not hoped for. A writer runs until it is refused
+// and the drain waits until every writer has had one admitted, so all are still
+// looping when the gate closes and each is refused exactly once. An earlier
+// version used a fixed mutation count and failed in CI, where every writer
+// finished before the drain ran.
 func TestBeginDrainUnderContention(t *testing.T) {
 	e := newTestEngine(t)
 
 	const (
 		writers = 8
-		// Safety valve only. A writer leaves this loop when it is refused,
-		// which the drain guarantees; the cap exists so that a gate which never
-		// closes fails the test instead of hanging it.
+		// Safety valve: a gate that never closes should fail this test, not hang it.
 		maxPerWriter = 1 << 20
 	)
 
@@ -201,8 +182,7 @@ func TestBeginDrainUnderContention(t *testing.T) {
 		}(i)
 	}
 
-	// Every writer has now had a mutation admitted, so every writer is still
-	// inside its loop. Draining here is what puts the gate in their path.
+	// Every writer has had one admitted, so every writer is still in its loop.
 	for i := 0; i < writers; i++ {
 		<-firstAdmit
 	}
@@ -228,8 +208,8 @@ func TestBeginDrainUnderContention(t *testing.T) {
 		}
 	}
 
-	// Exact, not "at least one": each writer was mid-loop when the drain landed
-	// and the gate never reopens, so each contributes precisely one refusal.
+	// Exact, not "at least one": the gate never reopens, so each writer
+	// contributes precisely one refusal.
 	if refused != writers {
 		t.Fatalf("refused = %d, want %d (one per writer)", refused, writers)
 	}

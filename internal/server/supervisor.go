@@ -2,16 +2,12 @@ package server
 
 import "sync"
 
-// Supervisor carries fatal conditions from any goroutine to the server
-// lifecycle goroutine. Panics do not cross goroutine boundaries in Go, so a
-// component that detects an untrustworthy shared state reports it here rather
-// than relying on a panic reaching the top level.
+// Supervisor carries fatal conditions from any goroutine to the lifecycle
+// goroutine, since panics do not cross goroutine boundaries in Go.
 //
-// The signal is a closed channel rather than a delivered value, deliberately.
-// A value can be received exactly once, so whichever waiter happened to read it
-// would consume the report and every other waiter would wait forever — which is
-// how a fatal condition raised during a graceful shutdown came to be silently
-// dropped. Closing broadcasts: every waiter observes it, in any order.
+// It broadcasts by closing a channel rather than delivering a value: a value is
+// received exactly once, so one waiter would consume the report and the rest
+// would wait forever. A fatal raised during shutdown was lost that way.
 type Supervisor struct {
 	once sync.Once
 	done chan struct{}

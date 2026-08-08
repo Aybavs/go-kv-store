@@ -25,18 +25,10 @@ func (w *Writer) WriteSimpleString(s string) error { return w.prefixed('+', s) }
 
 func (w *Writer) WriteError(s string) error { return w.prefixed('-', s) }
 
-// prefixed writes a single-line reply: a tag, the payload, then CRLF.
-//
-// The payload is written with CR and LF mapped to spaces. A status or error
-// line has no length prefix, so its only terminator is the CRLF this function
-// appends; an embedded CR or LF would end the frame early and every following
-// byte would be read as a further reply. Since error text routinely carries
-// client-supplied data — a command name, for one — that is a reply-splitting
-// vector, not a cosmetic concern. Redis maps the same two bytes for the same
-// reason.
-//
-// Bulk strings are deliberately exempt: they are length-prefixed, so CR and LF
-// inside them are ordinary payload bytes and must survive untouched.
+// prefixed writes a single-line reply, with CR and LF in the payload mapped to
+// spaces. These lines have no length prefix, so an embedded CR or LF would end
+// the frame early and split the reply. Bulk strings are exempt; see
+// docs/architecture.md, "Reply framing".
 func (w *Writer) prefixed(tag byte, s string) error {
 	if err := w.bw.WriteByte(tag); err != nil {
 		return err
@@ -47,9 +39,8 @@ func (w *Writer) prefixed(tag byte, s string) error {
 	return w.crlf()
 }
 
-// writeLineSafe writes s with every CR and LF replaced by a space. It copies
-// whole segments between offending bytes, so a payload containing neither —
-// the overwhelmingly common case — costs one scan and one write.
+// writeLineSafe copies whole segments between offending bytes, so the common
+// case of a payload with neither costs one scan and one write.
 func (w *Writer) writeLineSafe(s string) error {
 	for {
 		i := strings.IndexAny(s, "\r\n")
@@ -93,9 +84,8 @@ func (w *Writer) WriteNullBulk() error {
 }
 
 // WriteArrayHeader writes an array header; the caller writes n elements after
-// it. Note the asymmetry with this package's decoder: n below 1 encodes an
-// empty or null array, which is valid on the reply side but is rejected by
-// ReadCommand, which only decodes requests.
+// it. n below 1 is a valid reply but is rejected by ReadCommand, which decodes
+// requests only.
 func (w *Writer) WriteArrayHeader(n int) error {
 	if err := w.bw.WriteByte('*'); err != nil {
 		return err

@@ -29,9 +29,8 @@ type Registry struct {
 func New(e *engine.Engine) *Registry {
 	r := &Registry{engine: e, cmds: make(map[string]spec)}
 	r.cmds["PING"] = spec{minArgs: 1, maxArgs: 2, run: cmdPing}
-	// SET is deliberately unbounded above 3, matching Redis's -3 arity. The
-	// arguments past the value are options, and rejecting an unsupported one is
-	// cmdSet's job, not the arity check's — see cmdSet.
+	// Unbounded above 3, matching Redis's -3 arity: the extra arguments are
+	// options, and rejecting one is cmdSet's job, not the arity check's.
 	r.cmds["SET"] = spec{minArgs: 3, maxArgs: -1, run: cmdSet}
 	r.cmds["GET"] = spec{minArgs: 2, maxArgs: 2, run: cmdGet}
 	r.cmds["DEL"] = spec{minArgs: 2, maxArgs: -1, run: cmdDel}
@@ -48,30 +47,22 @@ func (r *Registry) Dispatch(args [][]byte) Reply {
 	name := strings.ToUpper(string(args[0]))
 	sp, ok := r.cmds[name]
 	if !ok {
-		// Redis echoes the name exactly as the client sent it here, casing and
-		// all, because there is no canonical form for a command it does not
-		// know. We match that.
+		// Client's casing: an unknown command has no canonical form.
 		return Err("ERR unknown command '" + echoName(args[0]) + "'")
 	}
 	if len(args) < sp.minArgs || (sp.maxArgs >= 0 && len(args) > sp.maxArgs) {
-		// The command is known, so there is a canonical form. Redis uses it,
-		// lowercased, rather than repeating the client's casing.
+		// Canonical lowercase: the command is known, so a canonical form exists.
 		return Err("ERR wrong number of arguments for '" + strings.ToLower(name) + "' command")
 	}
 	return sp.run(r.engine, args)
 }
 
-// maxEchoedName bounds how much of an unknown command name is quoted back to
-// the client. A name may be as long as the configured bulk-string limit — 64
-// MiB by default — and reflecting one of those in full would let a client
-// amplify a single request into a reply of its own choosing. Redis bounds the
-// same text for the same reason.
+// A name may be as long as the bulk-string limit, so echoing one in full would
+// let a client amplify a small request into a large reply.
 const maxEchoedName = 128
 
-// echoName renders a client-supplied command name for an error reply. The
-// result is a bounded byte string, not necessarily valid UTF-8: truncation is
-// applied at a byte offset and the name itself may be arbitrary binary. The
-// encoder neutralises CR and LF, so no content here can affect framing.
+// echoName truncates at a byte offset, so the result is not necessarily valid
+// UTF-8. Framing is safe regardless: the encoder neutralises CR and LF.
 func echoName(b []byte) string {
 	if len(b) > maxEchoedName {
 		return string(b[:maxEchoedName]) + "..."
@@ -87,8 +78,7 @@ func mutationError(err error) Reply {
 	return Err("ERR internal error")
 }
 
-// cmdPing answers PONG, or echoes the optional message as a bulk string, as
-// Redis does. The conversion to string copies the borrowed bytes.
+// cmdPing answers PONG, or echoes the optional message as a bulk string.
 func cmdPing(_ *engine.Engine, args [][]byte) Reply {
 	if len(args) == 2 {
 		return Bulk(string(args[1]))
@@ -96,15 +86,11 @@ func cmdPing(_ *engine.Engine, args [][]byte) Reply {
 	return Simple("PONG")
 }
 
-// cmdSet converts the borrowed key and value bytes into owned strings. This is
-// the ownership boundary: nothing beyond this point aliases the parser buffer.
+// cmdSet is the ownership boundary: the key and value are copied here, and
+// nothing beyond this point aliases the parser buffer.
 //
-// Anything past the value is an option. v0.1 implements none, so every one of
-// them is a syntax error — the same answer Redis gives to an option it does not
-// recognise, and a more accurate one than a wrong-arity complaint: a client
-// sending "SET k v EX 10" has the right number of arguments by Redis's rules
-// and would be misled by being told otherwise. v0.2 replaces this rejection
-// with the EX/PX parser rather than reworking the arity.
+// Options are a syntax error rather than a wrong-arity error — the count is
+// legal, the option is not. v0.2 replaces this branch with the EX/PX parser.
 func cmdSet(e *engine.Engine, args [][]byte) Reply {
 	if len(args) > 3 {
 		return Err("ERR syntax error")
