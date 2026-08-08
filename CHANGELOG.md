@@ -6,17 +6,29 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-08-08
+
+The first release with downloadable binaries. No change to server behaviour:
+every difference from 0.1.1 is in tooling, documentation or comments.
+
 ### Added
 
-- Release workflow: a tag push builds linux and darwin binaries for amd64 and
-  arm64, and uploads them with a `SHA256SUMS` file. It re-runs vet and the race
-  suite first, because a tag can be pushed at any commit, including one CI never
-  saw
+- Prebuilt binaries for linux and darwin on amd64 and arm64, with a
+  `SHA256SUMS` file, built by a release workflow that a tag push triggers. It
+  re-runs vet and the race suite first, because a tag can be pushed at any
+  commit, including one CI never saw
 - `examples/go-client`, a working client that exercises every command using an
   ordinary RESP2 library. Its own module, so the dependency stays out of the
   server
 - `docker-compose.yml` and a `make conformance` target that brings the reference
   Redis up, runs the differential suite and takes it down again
+
+### Changed
+
+- Comment volume cut by a third. Two doc comments had accumulated on one test,
+  and several others repeated rationale that `docs/` already carried, where a
+  second copy only drifts. Verified to be a comment-only change: every file
+  reparsed without comments is byte-identical to the previous release
 
 ## [0.1.1] - 2026-08-08
 
