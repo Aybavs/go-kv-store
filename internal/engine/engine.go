@@ -1,9 +1,7 @@
 // Package engine owns all shared-state synchronisation and mutation ordering.
-//
-// It holds the only RWMutex in the server. store is passive; engine decides
-// when it may be read or written. From v0.3 the same critical section also
-// orders append-only-file records, which is why mutation methods already
-// return an error.
+// It holds the only RWMutex in the server; store is passive. Mutation methods
+// already return an error because from v0.3 the same critical section also
+// orders append-only-file records.
 package engine
 
 import (
@@ -41,15 +39,12 @@ func New(onFatal func(error)) *Engine {
 	}
 }
 
-// guard converts a panic inside the commit path into a reported fatal
-// condition. Panics do not cross goroutine boundaries in Go, so reporting to
-// the supervisor — not re-panicking alone — is what triggers shutdown.
+// guard reports a panic in the commit path as a fatal condition; panics do not
+// cross goroutine boundaries in Go, so reporting is what triggers shutdown.
 //
-// Note the deferred ordering in the mutation methods: guard is registered before
-// the unlock, so the lock is already released by the time this runs. That is
-// deliberate — reporting while still holding the lock would deadlock if onFatal
-// ever called back into the engine — but it means shared state is visible to
-// other goroutines before the fatal condition is reported.
+// It is registered before the unlock, so the lock is released by the time this
+// runs — reporting while holding it would deadlock if onFatal called back into
+// the engine. The cost is that shared state is visible before the report.
 func (e *Engine) guard() {
 	if r := recover(); r != nil {
 		e.onFatal(fmt.Errorf("engine commit path panic: %v\n%s", r, debug.Stack()))

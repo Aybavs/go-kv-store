@@ -103,16 +103,10 @@ func TestShutdownWithIdleClient(t *testing.T) {
 	}
 }
 
-// TestMutationsStopBeingAcceptedAfterShutdown asserts the property a client can
-// actually observe: shortly after shutdown begins, mutations stop succeeding and
-// the connection is closed.
-//
-// It deliberately does not assert that the very next command after cancel() is
-// refused. cancel() only initiates shutdown; BeginDrain runs asynchronously in
-// the server's lifecycle goroutine, so a command arriving in between is
-// legitimately served. The precise invariant — once BeginDrain returns, no
-// mutation is admitted — is pinned at the engine level by
-// TestBeginDrainUnderContention, where it is directly observable.
+// Asserts what a client can observe: shortly after shutdown begins, mutations
+// stop succeeding. Not that the next command after cancel() is refused —
+// BeginDrain runs asynchronously, so one arriving in between is legitimately
+// served. The exact invariant is pinned by TestBeginDrainUnderContention.
 func TestMutationsStopBeingAcceptedAfterShutdown(t *testing.T) {
 	addr, cancel := startServer(t, nil)
 	c := dial(t, addr)

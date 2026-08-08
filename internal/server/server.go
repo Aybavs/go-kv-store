@@ -163,15 +163,10 @@ func (s *Server) gracefulShutdown() error {
 
 	drained := s.waitConns(s.cfg.ShutdownTimeout)
 
-	// RunWithReady's select has already committed to this branch, so this is the
-	// only remaining place a fatal condition can be observed. Reporting it here
-	// is what stops the process exiting 0 after an invariant violation.
-	//
-	// The guarantee is deliberately scoped to what is knowable: a fatal reported
-	// at any point before this check is surfaced. A fatal reported after the
-	// shutdown has already decided its outcome is not, and must not be — by then
-	// the drain genuinely completed, and waiting around for a report that may
-	// never come would only make every clean shutdown slower.
+	// The select has committed to this branch, so this is the last place a fatal
+	// can be observed, and checking here is what stops the process exiting 0
+	// after an invariant violation. Scoped to what is knowable: one reported
+	// after the outcome is decided is not surfaced, and must not be.
 	if s.sup.Fired() {
 		cause := s.sup.Cause()
 		s.log.Error("fatal condition reported during shutdown", "err", cause)

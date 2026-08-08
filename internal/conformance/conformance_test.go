@@ -1,13 +1,9 @@
-// Package conformance compares this server's observable behaviour against a
-// real Redis instance for the command subset documented in docs/protocol.md.
+// Package conformance compares this server against a real Redis for the command
+// subset in docs/protocol.md. Unlike every other suite here, these tests assert
+// what an independent implementation does rather than what we expect. Redis
+// behaviour outside the documented subset is not part of our contract.
 //
-// The value of these tests is that they are not written against our own
-// expectations. Every other suite in this repository asserts what we believe
-// the behaviour should be; these assert what an independent implementation
-// actually does. Redis behaviour outside the documented subset is not part of
-// our contract and is not exercised here.
-//
-// They skip unless REDIS_ADDR is set.
+// Skips unless REDIS_ADDR is set.
 package conformance
 
 import (
@@ -28,15 +24,12 @@ import (
 	"github.com/aybavs/go-kv-store/internal/server"
 )
 
-// dialTimeout bounds every conformance connection. A framing defect makes a
-// client wait for a reply that will never arrive, so an unbounded read would
-// turn a failure into a hang.
+// A framing defect makes a client wait for a reply that never arrives, so an
+// unbounded read would turn a failure into a hang.
 const dialTimeout = 5 * time.Second
 
-// startOurServer starts an in-process server on an ephemeral port and returns
-// its address. Each call gets a fresh engine, which is how these tests keep the
-// two sides symmetric: Redis is reset with FLUSHDB, and we have no equivalent
-// command, so we start over instead.
+// Each call gets a fresh engine: Redis is reset with FLUSHDB and we have no
+// equivalent, so both sides start clean.
 func startOurServer(t *testing.T) string {
 	t.Helper()
 	cfg := server.DefaultConfig()
@@ -88,14 +81,9 @@ func dial(t *testing.T, addr string) redis.Conn {
 	return conn
 }
 
-// TestClientSendsOnlySupportedCommands verifies the test client does not
-// smuggle in HELLO, CLIENT or any other command outside our documented subset.
-//
-// Our server answers anything outside the subset with an unknown-command error,
-// so it doubles as the detector: if the client negotiated RESP3 or issued a
-// hidden administrative command, dialling and running the basic operations
-// would fail here. Without this check, a differential mismatch could be the
-// client's fault rather than ours.
+// TestClientSendsOnlySupportedCommands checks the client does not smuggle in
+// HELLO or CLIENT. Our server rejects anything outside the subset, so it is its
+// own detector; without this, a mismatch could be the client's fault, not ours.
 func TestClientSendsOnlySupportedCommands(t *testing.T) {
 	conn := dial(t, startOurServer(t))
 
@@ -121,13 +109,9 @@ type step struct {
 
 func cmd(parts ...interface{}) step { return step{args: parts} }
 
-// normalise reduces a redigo reply to a comparable form. Error messages are
-// reduced to their class, because docs/protocol.md documents classes, not text.
-//
-// A transport failure is not a reply and must never be normalised into one: if
-// it were, a connection our server dropped could be compared against a Redis
-// reply and reported as a mere difference in wording. It fails the test loudly
-// instead.
+// normalise reduces a reply to a comparable form; errors to their class, since
+// docs/protocol.md documents classes rather than text. A transport failure is
+// not a reply and fails the test outright rather than being classified.
 func normalise(t *testing.T, reply interface{}, err error) string {
 	t.Helper()
 	if err != nil {
@@ -158,8 +142,8 @@ func normalise(t *testing.T, reply interface{}, err error) string {
 	}
 }
 
-// asRedisError reports whether err is a server-sent error reply. redigo models
-// those as redis.Error and everything else as an ordinary error.
+// redigo models server-sent error replies as redis.Error, everything else as an
+// ordinary error.
 func asRedisError(err error, out *redis.Error) bool {
 	rerr, ok := err.(redis.Error)
 	if ok {
@@ -239,8 +223,7 @@ func TestDifferentialAgainstRedis(t *testing.T) {
 	for _, name := range names {
 		steps := scenarios[name]
 		t.Run(name, func(t *testing.T) {
-			// A fresh server per scenario, so no scenario can depend on a key
-			// another one happened to leave behind.
+			// Fresh server per scenario: nothing can depend on a leftover key.
 			got := runScenario(t, startOurServer(t), steps, false)
 			want := runScenario(t, redisTarget, steps, true)
 			if len(got) != len(want) {
@@ -261,7 +244,6 @@ func runScenario(t *testing.T, addr string, steps []step, isRedis bool) []string
 	conn := dial(t, addr)
 
 	if isRedis {
-		// Start from a clean slate so key state cannot leak between scenarios.
 		if _, err := conn.Do("FLUSHDB"); err != nil {
 			t.Fatalf("FLUSHDB: %v", err)
 		}
@@ -276,7 +258,7 @@ func runScenario(t *testing.T, addr string, steps []step, isRedis bool) []string
 	return out
 }
 
-// describe renders a step for a failure message without dumping a 70 KB value.
+// Renders a step for a failure message without dumping a 70 KB value.
 func describe(s step) string {
 	parts := make([]string, 0, len(s.args))
 	for _, a := range s.args {
@@ -294,14 +276,9 @@ func describe(s step) string {
 }
 
 // TestPipelinedRepliesStayAligned is the differential form of the framing
-// property. Single request/response exchanges cannot detect a reply that splits
-// into two frames: the client reads the first, calls it the answer, and the
-// stray second frame is not noticed until the next command reads it by mistake.
-//
-// The scenario deliberately includes a command name containing CRLF. Error text
-// quotes that name, so an encoder that does not neutralise CR and LF emits an
-// extra frame here and every later reply is answered by the previous command's
-// leftovers. Redis is the oracle for what the sequence should be.
+// property. Request/response exchanges cannot see a split reply: the client
+// reads the first frame, calls it the answer, and the stray one is not noticed
+// until the next command consumes it. Two command names here contain CRLF.
 func TestPipelinedRepliesStayAligned(t *testing.T) {
 	redisTarget := redisAddr(t)
 
@@ -328,8 +305,8 @@ func TestPipelinedRepliesStayAligned(t *testing.T) {
 	}
 }
 
-// runPipelined sends every command before reading any reply, so the replies are
-// matched to commands by position in the stream rather than by turn-taking.
+// Sends everything before reading, so replies match commands by position in the
+// stream rather than by turn-taking.
 func runPipelined(t *testing.T, addr string, steps []step, isRedis bool) []string {
 	t.Helper()
 	conn := dial(t, addr)
@@ -355,8 +332,7 @@ func runPipelined(t *testing.T, addr string, steps []step, isRedis bool) []strin
 		if err != nil {
 			var rerr redis.Error
 			if !asRedisError(err, &rerr) {
-				// A timeout here means a reply never arrived: the stream is
-				// misaligned, which is exactly the defect this test exists for.
+				// A timeout means a reply never arrived: the stream is misaligned.
 				t.Fatalf("receive %d (%s) failed, replies are misaligned: %v",
 					i, describe(steps[i]), err)
 			}

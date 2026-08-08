@@ -9,21 +9,13 @@ import (
 	"slices"
 )
 
-// Limits bound what the decoder will accept from an untrusted peer.
-//
-// MaxArrayElements and MaxBulkLength each bound one dimension of a request, and
-// on their own they multiply: with the defaults below, 1024 arguments of 64 MiB
-// each is a 64 GiB frame that both per-element limits accept. MaxCommandBytes
-// bounds the product, which is the only one of the three that bounds how much a
-// single connection can make the server hold at once.
+// Limits bound what the decoder will accept from an untrusted peer. The first
+// two bound one dimension each and multiply; MaxCommandBytes bounds the product.
+// See docs/protocol.md.
 type Limits struct {
 	MaxArrayElements int
 	MaxBulkLength    int
-	// MaxCommandBytes caps the total payload of one request frame. It counts
-	// argument bytes only; the few bytes of per-element framing are not
-	// charged against it. Zero or negative disables the check, which is what a
-	// zero-value Limits gets — the server always sets it from DefaultLimits or
-	// a flag.
+	// Total argument bytes per frame. Zero disables the check.
 	MaxCommandBytes int
 }
 
@@ -31,25 +23,17 @@ type Limits struct {
 func DefaultLimits() Limits {
 	return Limits{
 		MaxArrayElements: 1024,
-		MaxBulkLength:    64 << 20, // 64 MiB
-		// Twice MaxBulkLength: enough for a single maximum-size value plus its
-		// key and command name, so no request that the per-element limit allows
-		// is rejected for its total, while still bounding the frame at a size
-		// the process can hold.
-		MaxCommandBytes: 128 << 20, // 128 MiB
+		MaxBulkLength:    64 << 20,  // 64 MiB
+		MaxCommandBytes:  128 << 20, // twice MaxBulkLength, so a maximum-size value still fits
 	}
 }
 
-// maxPreallocation bounds how much the decoder reserves before the corresponding
-// bytes have actually arrived. A peer can declare a huge bulk length in a dozen
-// bytes; without this bound the declaration alone would allocate the full amount.
+// A peer can declare a huge bulk length in a dozen bytes, so reserve only this
+// much before the bytes actually arrive.
 const maxPreallocation = 64 << 10 // 64 KiB
 
-// maxRetainedBuffer bounds how much decode buffer a connection keeps between
-// commands. Anything larger is released once the command that grew it is done,
-// trading a reallocation on the next large command for not holding that memory
-// while the connection is idle. Ordinary traffic never reaches this size, so the
-// reuse that matters is unaffected.
+// Decode buffer a connection may keep between commands; anything larger is
+// released so one big request cannot park memory for the life of the connection.
 const maxRetainedBuffer = 1 << 20 // 1 MiB
 
 // ProtocolError means the stream cannot be resynchronised. The caller must
@@ -61,10 +45,6 @@ func (e *ProtocolError) Error() string { return "protocol error: " + e.Msg }
 func protoErr(msg string) error { return &ProtocolError{Msg: msg} }
 
 // Reader decodes RESP2 request frames from a stream.
-//
-// The slices returned by ReadCommand are borrowed: they point into an internal
-// buffer that is reused by the next call. Callers that retain data beyond the
-// current command must copy it.
 type Reader struct {
 	br      *bufio.Reader
 	limits  Limits
@@ -80,21 +60,15 @@ func NewReader(r io.Reader, limits Limits) *Reader {
 	}
 }
 
-// ReadCommand reads one request frame: a RESP2 array of bulk strings.
+// ReadCommand reads one request frame: a RESP2 array of bulk strings. The
+// returned slices point into a buffer the next call reuses; copy what you keep.
 //
-// The returned slices are borrowed: they point into an internal buffer that the
-// next call reuses. Copy anything you retain beyond the current command.
+// Callers must distinguish three error classes:
 //
-// Errors fall into exactly three classes, and callers must distinguish them:
-//
-//   - io.EOF — the peer closed cleanly between frames. Close without replying.
-//     A stream that ends part-way through a frame is never reported this way;
-//     it is a *ProtocolError.
-//   - *ProtocolError — the peer sent something unparseable. The stream cannot be
-//     resynchronised, so write an error reply and then close.
-//   - any other error — a transport failure from the underlying reader (read
-//     deadline, connection reset). The connection is already broken; close
-//     without attempting to reply.
+//   - io.EOF — clean close between frames. Close without replying. A stream that
+//     ends mid-frame is a *ProtocolError, never this.
+//   - *ProtocolError — unparseable; cannot resynchronise. Reply, then close.
+//   - anything else — transport failure. Close without replying.
 func (r *Reader) ReadCommand() ([][]byte, error) {
 	line, err := r.readLine()
 	if err != nil {
@@ -114,15 +88,9 @@ func (r *Reader) ReadCommand() ([][]byte, error) {
 		return nil, protoErr("multibulk length exceeds limit")
 	}
 
-	// Release a buffer that one large command grew, instead of carrying its peak
-	// for the life of the connection. Reslicing to zero length keeps the whole
-	// capacity, so without this a client could send one maximum-size command and
-	// then sit idle holding that memory — and MaxCommandBytes would bound only
-	// the peak of a single command, not what a connection can park indefinitely.
-	//
-	// Done here rather than at the end of the previous call because the slices
-	// returned to the caller are borrowed from this buffer and stay valid until
-	// the next decode.
+	// Reslicing to zero keeps the capacity, so an oversized buffer is dropped
+	// instead. Done here, not after the previous call: the slices handed out
+	// then are borrowed from it and stay valid until now.
 	if cap(r.buf) > maxRetainedBuffer {
 		r.buf = nil
 	}
@@ -135,8 +103,8 @@ func (r *Reader) ReadCommand() ([][]byte, error) {
 		}
 	}
 
-	// Materialise slices only after the buffer has stopped growing, so that a
-	// reallocation cannot leave earlier arguments pointing at a stale array.
+	// Only now that the buffer has stopped growing: a reallocation would leave
+	// earlier arguments pointing at a stale array.
 	r.args = r.args[:0]
 	for _, o := range r.offsets {
 		r.args = append(r.args, r.buf[o[0]:o[1]])
@@ -159,18 +127,16 @@ func (r *Reader) readBulk() error {
 	if ln > r.limits.MaxBulkLength {
 		return protoErr("bulk length exceeds limit")
 	}
-	// Checked against the declared length before a single payload byte is read,
-	// so an oversized frame costs nothing to reject. Written as a subtraction
-	// rather than len(r.buf)+ln so that a large declared length cannot overflow
-	// the addition on the way to the comparison.
+	// Checked against the declared length before any payload is read, so an
+	// oversized frame costs nothing to reject. Subtraction rather than
+	// len(r.buf)+ln, which a large declared length could overflow.
 	if r.limits.MaxCommandBytes > 0 && ln > r.limits.MaxCommandBytes-len(r.buf) {
 		return protoErr("command exceeds limit")
 	}
 
 	start := len(r.buf)
-	// Read the payload plus its trailing CRLF in bounded chunks, so memory
-	// grows with data that has actually arrived rather than with the peer's
-	// claim about what is coming.
+	// Bounded chunks, so memory grows with data that arrived rather than with
+	// the peer's claim about what is coming.
 	for remaining := ln + 2; remaining > 0; {
 		chunk := remaining
 		if chunk > maxPreallocation {
