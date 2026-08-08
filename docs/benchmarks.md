@@ -20,27 +20,27 @@ describes.
 ## Results
 
 ```
-pkg: github.com/aybavs/go-kv-store/internal/store
-BenchmarkStoreSet-10                          82705848        14.72 ns/op       0 B/op   0 allocs/op
-BenchmarkStoreSetWithTTL-10                   49347938        24.39 ns/op       0 B/op   0 allocs/op
-BenchmarkStoreGetHit-10                      100000000        11.26 ns/op       0 B/op   0 allocs/op
-BenchmarkStoreGetHitWithTTL-10                60900436        19.01 ns/op       0 B/op   0 allocs/op
-BenchmarkStoreGetMiss-10                     231575439         5.113 ns/op      0 B/op   0 allocs/op
+pkg: github.com/aybavs/go-kv-store/internal/engine
+BenchmarkEngineSet-10                           27088570   41.64 ns/op	       0 B/op	       0 allocs/op
+BenchmarkEngineGet-10                           75994660   15.99 ns/op	       0 B/op	       0 allocs/op
+BenchmarkEngineParallelReads-10                 11567928   101.5 ns/op	       0 B/op	       0 allocs/op
+BenchmarkEngineParallelMixed-10                 14622577   83.70 ns/op	       0 B/op	       0 allocs/op
+BenchmarkEngineSetLoggedEverysec-10              1241560   947.0 ns/op	      64 B/op	       2 allocs/op
+BenchmarkEngineSetLoggedAlways-10                1000000   1007 ns/op	      64 B/op	       2 allocs/op
+BenchmarkEngineSetLoggedToDisk-10                    388   3713027 ns/op	      64 B/op	       2 allocs/op
+BenchmarkEngineSetLoggedToDiskParallel-10           1879   755708 ns/op	      99 B/op	       1 allocs/op
 
 pkg: github.com/aybavs/go-kv-store/internal/resp
-BenchmarkReadCommand-10                       10687462       108.6 ns/op  340.62 MB/s   0 B/op   0 allocs/op
-BenchmarkWriteBulk-10                         42120656        27.66 ns/op       0 B/op   0 allocs/op
-BenchmarkWriteError-10                        33781048        35.26 ns/op       0 B/op   0 allocs/op
+BenchmarkReadCommand-10                         10887110   108.8 ns/op	 340.15 MB/s	       0 B/op	       0 allocs/op
+BenchmarkWriteBulk-10                           41956390   28.00 ns/op	       0 B/op	       0 allocs/op
+BenchmarkWriteError-10                          34273881   35.30 ns/op	       0 B/op	       0 allocs/op
 
-pkg: github.com/aybavs/go-kv-store/internal/engine
-BenchmarkEngineSet-10                         26299279        41.89 ns/op       0 B/op   0 allocs/op
-BenchmarkEngineGet-10                         71359722        16.29 ns/op       0 B/op   0 allocs/op
-BenchmarkEngineParallelReads-10                9131733       130.9 ns/op        2 B/op   0 allocs/op
-BenchmarkEngineParallelMixed-10                6504892       184.3 ns/op       10 B/op   1 allocs/op
-BenchmarkEngineSetLoggedEverysec-10            1283890       946.0 ns/op       64 B/op   2 allocs/op
-BenchmarkEngineSetLoggedAlways-10              1000000      1001 ns/op         64 B/op   2 allocs/op
-BenchmarkEngineSetLoggedToDisk-10                  379   3678964 ns/op         64 B/op   2 allocs/op
-BenchmarkEngineSetLoggedToDiskParallel-10         1874    756653 ns/op         99 B/op   1 allocs/op
+pkg: github.com/aybavs/go-kv-store/internal/store
+BenchmarkStoreSet-10                            84531092   14.13 ns/op	       0 B/op	       0 allocs/op
+BenchmarkStoreSetWithTTL-10                     49405674   24.34 ns/op	       0 B/op	       0 allocs/op
+BenchmarkStoreGetHit-10                        100000000   10.77 ns/op	       0 B/op	       0 allocs/op
+BenchmarkStoreGetHitWithTTL-10                  67418256   18.34 ns/op	       0 B/op	       0 allocs/op
+BenchmarkStoreGetMiss-10                       240436652   5.247 ns/op	       0 B/op	       0 allocs/op
 ```
 
 ## What persistence costs
@@ -51,11 +51,11 @@ last two use a real file with a real `fsync`.
 
 | | ns/op | |
 |---|---|---|
-| `EngineSet` | 41.9 | no log attached |
-| `EngineSetLoggedEverysec` | 946 | + hand off to the writer, wait for `write()` |
-| `EngineSetLoggedAlways` | 1001 | + wait for `Sync()` |
-| `EngineSetLoggedToDisk` | 3 678 964 | a real `fsync` per write |
-| `EngineSetLoggedToDiskParallel` | 756 653 | the same, with writers in flight |
+| `EngineSet` | 41.6 | no log attached |
+| `EngineSetLoggedEverysec` | 947 | + hand off to the writer, wait for `write()` |
+| `EngineSetLoggedAlways` | 1007 | + wait for `Sync()` |
+| `EngineSetLoggedToDisk` | 3 713 027 | a real `fsync` per write |
+| `EngineSetLoggedToDiskParallel` | 755 708 | the same, with writers in flight |
 
 Three things are worth reading off this table.
 
@@ -83,7 +83,7 @@ slower, with no log attached at all**.
 
 The cause was an argument evaluated whether or not it was used —
 `aof.DeriveSet(...)` built a record at every call site, including when there was
-no log to put it in. Deriving only when there is a log brought it to 41.9 ns.
+no log to put it in. Deriving only when there is a log brought it to 41.6 ns.
 
 The remaining ~10 ns over the v0.2 baseline is the commit path's shape and is
 being kept deliberately. The mutation methods wrap their locked section in a
@@ -94,6 +94,53 @@ unlock — without which a panic could leave `onFatal` deadlocked against a held
 lock. Ten nanoseconds on a path that already costs 108 ns to decode its own
 command is not worth that trade, and if end-to-end work in v0.5 ever says
 otherwise, it will say so with a number.
+
+## Reads do not scale, and that is the sharding question
+
+`BenchmarkEngineParallelReads` is the number ADR-0001 says a sharding decision
+would be made against. A single figure hides what it is actually saying, so here
+it is across core counts:
+
+| cores | reads ns/op | reads M ops/s | mixed ns/op | mixed M ops/s |
+|---|---|---|---|---|
+| 1 | 23.1 | 43.3 | 27.2 | 36.8 |
+| 2 | 76.7 | 13.0 | 57.5 | 17.4 |
+| 4 | 81.7 | 12.2 | 66.2 | 15.1 |
+| 8 | 111.2 | 9.0 | 75.2 | 13.3 |
+| 10 | 101.3 | 9.9 | 83.0 | 12.1 |
+
+**Total throughput falls as cores are added.** Going from one core to two costs
+3.3×. This is a property of `sync.RWMutex`, not a defect here: `RLock`
+increments a counter shared by every reader, so the cache line holding it
+ping-pongs between cores, and that costs more than serialising would.
+
+**This is not on its own an argument for sharding.** The loop does nothing but
+lock, read and unlock. A real request also parses a command — 108 ns before the
+engine is reached — and makes syscalls, which cost microseconds. What fraction
+of a real request the lock actually is remains unmeasured, and that is what the
+end-to-end work in v0.5 is for. ADR-0001's rule stands: sharding is a decision
+to be made against profiling data, and this is not yet that data.
+
+One observation worth carrying into v0.5 rather than explaining away here: the
+mixed workload is *faster* than the pure-read one above two cores, which is
+counter-intuitive when it holds an exclusive lock a tenth of the time. A
+plausible reason is that a writer parks readers instead of leaving them
+contending on the shared counter, but that is a hypothesis and has not been
+measured.
+
+## A measurement error in the benchmarks themselves
+
+Both parallel benchmarks used to build their keys inside the measured loop, with
+`strconv.Itoa` and a string concatenation. That put allocator behaviour into the
+number the sharding decision was supposed to turn on.
+
+| | before | after |
+|---|---|---|
+| `EngineParallelReads` | 130.9 ns, 2 B/op | 101.5 ns, 0 B/op |
+| `EngineParallelMixed` | 184.3 ns, 10 B/op, 1 alloc | 83.7 ns, 0 B/op |
+
+The mixed figure was more than half benchmark overhead. Keys are now built once,
+before the timer starts.
 
 ## Notes
 
