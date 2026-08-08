@@ -6,6 +6,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 func newTestEngine(t *testing.T) *Engine {
@@ -240,4 +241,47 @@ func TestDeleteCountsEachKeyOnce(t *testing.T) {
 	if n != 1 {
 		t.Fatalf("Delete = %d, want 1", n)
 	}
+}
+
+// TestInjectedClockIsUsed pins the seam itself. The engine supplies the clock
+// that store's expiry checks are made against, so a read path that called
+// time.Now directly, or skipped the clock entirely, would leave every later TTL
+// test measuring nothing. Counting the calls is the only way to see that from
+// outside, since v0.2 has no TTL API on the engine yet.
+func TestInjectedClockIsUsed(t *testing.T) {
+	var calls int
+	fixed := time.Date(2026, 8, 8, 12, 0, 0, 0, time.UTC)
+	e := NewWithClock(
+		func(err error) { t.Errorf("unexpected fatal: %v", err) },
+		func() time.Time { calls++; return fixed },
+	)
+
+	if err := e.Set("k", "v"); err != nil {
+		t.Fatalf("Set: %v", err)
+	}
+	if _, ok := e.Get("k"); !ok {
+		t.Fatal("Get did not find the key")
+	}
+	if calls == 0 {
+		t.Fatal("Get did not consult the injected clock; expiry would be judged against the wrong time")
+	}
+
+	before := calls
+	if n := e.Exists([]string{"k", "k", "absent"}); n != 2 {
+		t.Fatalf("Exists = %d, want 2", n)
+	}
+	// One read for the whole call, not one per key: keys in a single EXISTS
+	// must be judged against the same instant.
+	if got := calls - before; got != 1 {
+		t.Fatalf("Exists consulted the clock %d times, want 1 for the whole call", got)
+	}
+}
+
+func TestNewRejectsNilClock(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Fatal("NewWithClock accepted a nil clock")
+		}
+	}()
+	NewWithClock(func(error) {}, nil)
 }
