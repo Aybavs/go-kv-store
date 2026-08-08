@@ -11,6 +11,9 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Crash-durability tests that kill a real server process at random moments and
   restart it against the file left on disk, asserting that every acknowledged
   write survives and that the recovered keys form a contiguous prefix
+- ADR-0003, recording why fatal conditions are broadcast by closing a channel
+  rather than delivered as a value. The decision dates from v0.1.0 and had gone
+  unwritten
 
 ## [0.3.0] - 2026-08-09
 
