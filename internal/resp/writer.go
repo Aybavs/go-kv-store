@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"io"
 	"strconv"
+	"strings"
 )
 
 // Writer encodes RESP2 replies. It buffers; call Flush to deliver.
@@ -24,14 +25,46 @@ func (w *Writer) WriteSimpleString(s string) error { return w.prefixed('+', s) }
 
 func (w *Writer) WriteError(s string) error { return w.prefixed('-', s) }
 
+// prefixed writes a single-line reply: a tag, the payload, then CRLF.
+//
+// The payload is written with CR and LF mapped to spaces. A status or error
+// line has no length prefix, so its only terminator is the CRLF this function
+// appends; an embedded CR or LF would end the frame early and every following
+// byte would be read as a further reply. Since error text routinely carries
+// client-supplied data — a command name, for one — that is a reply-splitting
+// vector, not a cosmetic concern. Redis maps the same two bytes for the same
+// reason.
+//
+// Bulk strings are deliberately exempt: they are length-prefixed, so CR and LF
+// inside them are ordinary payload bytes and must survive untouched.
 func (w *Writer) prefixed(tag byte, s string) error {
 	if err := w.bw.WriteByte(tag); err != nil {
 		return err
 	}
-	if _, err := w.bw.WriteString(s); err != nil {
+	if err := w.writeLineSafe(s); err != nil {
 		return err
 	}
 	return w.crlf()
+}
+
+// writeLineSafe writes s with every CR and LF replaced by a space. It copies
+// whole segments between offending bytes, so a payload containing neither —
+// the overwhelmingly common case — costs one scan and one write.
+func (w *Writer) writeLineSafe(s string) error {
+	for {
+		i := strings.IndexAny(s, "\r\n")
+		if i < 0 {
+			_, err := w.bw.WriteString(s)
+			return err
+		}
+		if _, err := w.bw.WriteString(s[:i]); err != nil {
+			return err
+		}
+		if err := w.bw.WriteByte(' '); err != nil {
+			return err
+		}
+		s = s[i+1:]
+	}
 }
 
 func (w *Writer) WriteInt(n int64) error {

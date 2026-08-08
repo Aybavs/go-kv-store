@@ -2,6 +2,7 @@ package resp
 
 import (
 	"bytes"
+	"strings"
 	"testing"
 )
 
@@ -35,6 +36,91 @@ func TestWriterTypes(t *testing.T) {
 				t.Fatalf("got %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+// TestWriterLineRepliesCannotSplitFrames pins the reply-splitting defence. A
+// status or error line ends at the first CRLF, so a CR or LF carried in the
+// payload — error text quotes client-supplied data — would terminate the frame
+// early and turn the remainder into extra replies the client never asked for.
+// Each case below asserts exactly one CRLF, at the very end.
+func TestWriterLineRepliesCannotSplitFrames(t *testing.T) {
+	cases := []struct {
+		name string
+		fn   func(*Writer) error
+		want string
+	}{
+		{
+			"error with CRLF",
+			func(w *Writer) error { return w.WriteError("ERR unknown command 'A\r\n+INJECTED'") },
+			"-ERR unknown command 'A  +INJECTED'\r\n",
+		},
+		{
+			"error with lone LF",
+			func(w *Writer) error { return w.WriteError("ERR a\nb") },
+			"-ERR a b\r\n",
+		},
+		{
+			"error with lone CR",
+			func(w *Writer) error { return w.WriteError("ERR a\rb") },
+			"-ERR a b\r\n",
+		},
+		{
+			"error ending in CRLF",
+			func(w *Writer) error { return w.WriteError("ERR trailing\r\n") },
+			"-ERR trailing  \r\n",
+		},
+		{
+			"status with CRLF",
+			func(w *Writer) error { return w.WriteSimpleString("O\r\nK") },
+			"+O  K\r\n",
+		},
+		{
+			"consecutive newlines",
+			func(w *Writer) error { return w.WriteError("a\n\n\nb") },
+			"-a   b\r\n",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			w := NewWriter(&buf)
+			if err := tc.fn(w); err != nil {
+				t.Fatalf("write: %v", err)
+			}
+			if err := w.Flush(); err != nil {
+				t.Fatalf("flush: %v", err)
+			}
+			got := buf.String()
+			if got != tc.want {
+				t.Fatalf("got %q, want %q", got, tc.want)
+			}
+			// The framing property itself, stated independently of the exact
+			// bytes above: one terminator, and it is the last thing written.
+			if n := strings.Count(got, "\r\n"); n != 1 {
+				t.Fatalf("got %d CRLF terminators in %q, want exactly 1", n, got)
+			}
+			if !strings.HasSuffix(got, "\r\n") {
+				t.Fatalf("%q does not end with CRLF", got)
+			}
+		})
+	}
+}
+
+// TestWriterBulkPreservesCRLF is the other half of the contract: bulk strings
+// carry a length prefix, so CR and LF inside them are payload and must survive
+// the sanitising applied to line replies.
+func TestWriterBulkPreservesCRLF(t *testing.T) {
+	var buf bytes.Buffer
+	w := NewWriter(&buf)
+	if err := w.WriteBulk("a\r\nb"); err != nil {
+		t.Fatalf("WriteBulk: %v", err)
+	}
+	if err := w.Flush(); err != nil {
+		t.Fatalf("Flush: %v", err)
+	}
+	if got, want := buf.String(), "$4\r\na\r\nb\r\n"; got != want {
+		t.Fatalf("got %q, want %q", got, want)
 	}
 }
 
