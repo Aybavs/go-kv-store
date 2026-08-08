@@ -1,14 +1,19 @@
 package engine
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/aybavs/go-kv-store/internal/aof"
+	"github.com/aybavs/go-kv-store/internal/resp"
 )
 
 func newTestEngine(t *testing.T) *Engine {
@@ -598,5 +603,285 @@ func TestExpirationWorkerUnderReaders(t *testing.T) {
 
 	if err := e.StopExpiration(context.Background()); err != nil {
 		t.Fatalf("StopExpiration: %v", err)
+	}
+}
+
+// recordingFile captures what the engine actually wrote, so the effect records
+// can be asserted rather than assumed.
+type recordingFile struct {
+	mu      sync.Mutex
+	written []byte
+	syncErr error
+	// gate, when non-nil, holds every Write open until it is closed.
+	gate chan struct{}
+}
+
+func (f *recordingFile) Write(p []byte) (int, error) {
+	if f.gate != nil {
+		<-f.gate
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.written = append(f.written, p...)
+	return len(p), nil
+}
+
+func (f *recordingFile) Sync() error  { return f.syncErr }
+func (f *recordingFile) Close() error { return nil }
+
+func (f *recordingFile) records(t *testing.T) []aof.Record {
+	t.Helper()
+	f.mu.Lock()
+	data := append([]byte(nil), f.written...)
+	f.mu.Unlock()
+
+	r := resp.NewReader(bytes.NewReader(data), resp.DefaultLimits())
+	var out []aof.Record
+	for {
+		rec, err := aof.Decode(r)
+		if errors.Is(err, io.EOF) {
+			return out
+		}
+		if err != nil {
+			t.Fatalf("decoding what the engine wrote: %v", err)
+		}
+		out = append(out, rec)
+	}
+}
+
+func newLoggedEngine(t *testing.T, f aof.File, p aof.Policy) (*Engine, *testClock, <-chan error) {
+	t.Helper()
+	c := newTestClock()
+	fatal := make(chan error, 1)
+	e := NewWithClock(func(err error) {
+		select {
+		case fatal <- err:
+		default:
+		}
+	}, c.now)
+	l := aof.Open(f, p, func(err error) {
+		select {
+		case fatal <- err:
+		default:
+		}
+	})
+	e.AttachLog(l, p)
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = l.Close(ctx)
+	})
+	return e, c, fatal
+}
+
+// TestEffectsAreLoggedNotCommands is the ADR-0004 property end to end: what
+// lands in the log is the resulting state, so no record depends on one before
+// it. EXPIRE and PERSIST in particular become complete SETs carrying the value.
+func TestEffectsAreLoggedNotCommands(t *testing.T) {
+	f := &recordingFile{}
+	e, clock, _ := newLoggedEngine(t, f, aof.EverySec)
+
+	if err := e.Set("k", "5", NoExpiry()); err != nil {
+		t.Fatalf("Set: %v", err)
+	}
+	if _, err := e.Expire("k", 30*time.Second); err != nil {
+		t.Fatalf("Expire: %v", err)
+	}
+	if _, err := e.Persist("k"); err != nil {
+		t.Fatalf("Persist: %v", err)
+	}
+	if _, err := e.Delete([]string{"k"}); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+
+	got := f.records(t)
+	if len(got) != 4 {
+		t.Fatalf("wrote %d records, want 4: %+v", len(got), got)
+	}
+
+	// EXPIRE is not logged as "EXPIRE k 30"; it is the state the key ends in.
+	expire := got[1]
+	if expire.Kind != aof.KindSet || expire.Key != "k" || expire.Value != "5" {
+		t.Fatalf("EXPIRE logged as %+v, want a SET carrying the value", expire)
+	}
+	if !expire.HasExpiry || expire.ExpireAtMS != clock.now().Add(30*time.Second).UnixMilli() {
+		t.Fatalf("EXPIRE record has deadline %d, want an absolute PXAT", expire.ExpireAtMS)
+	}
+
+	// PERSIST likewise: a SET with no expiry, not a "PERSIST k".
+	persist := got[2]
+	if persist.Kind != aof.KindSet || persist.Value != "5" || persist.HasExpiry {
+		t.Fatalf("PERSIST logged as %+v, want a SET with no expiry", persist)
+	}
+
+	if got[3].Kind != aof.KindDel || len(got[3].Keys) != 1 || got[3].Keys[0] != "k" {
+		t.Fatalf("DEL logged as %+v", got[3])
+	}
+}
+
+// TestNothingObservableNothingLogged: a call that changes nothing must not
+// append a record. Otherwise every failed EXPIRE grows the log.
+func TestNothingObservableNothingLogged(t *testing.T) {
+	f := &recordingFile{}
+	e, _, _ := newLoggedEngine(t, f, aof.EverySec)
+
+	if applied, err := e.Expire("absent", time.Second); err != nil || applied {
+		t.Fatalf("Expire on a missing key = (%v, %v)", applied, err)
+	}
+	if removed, err := e.Persist("absent"); err != nil || removed {
+		t.Fatalf("Persist on a missing key = (%v, %v)", removed, err)
+	}
+	if n, err := e.Delete([]string{"absent"}); err != nil || n != 0 {
+		t.Fatalf("Delete of a missing key = (%v, %v)", n, err)
+	}
+
+	_ = e.Set("plain", "v", NoExpiry())
+	if removed, err := e.Persist("plain"); err != nil || removed {
+		t.Fatalf("Persist on a key with no TTL = (%v, %v)", removed, err)
+	}
+
+	got := f.records(t)
+	if len(got) != 1 {
+		t.Fatalf("wrote %d records, want 1 (only the SET changed anything): %+v", len(got), got)
+	}
+}
+
+// TestDelRecordsOnlyLiveKeys: an expired key is already absent on replay, so
+// naming it in the record would be noise, and counting it would be wrong.
+func TestDelRecordsOnlyLiveKeys(t *testing.T) {
+	f := &recordingFile{}
+	e, clock, _ := newLoggedEngine(t, f, aof.EverySec)
+
+	_ = e.Set("live", "v", NoExpiry())
+	_ = e.Set("dead", "v", ExpiresIn(time.Second))
+	clock.advance(time.Hour)
+
+	n, err := e.Delete([]string{"live", "dead", "absent", "live"})
+	if err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("Delete reported %d, want 1", n)
+	}
+
+	got := f.records(t)
+	del := got[len(got)-1]
+	if del.Kind != aof.KindDel {
+		t.Fatalf("last record is %+v, want a DEL", del)
+	}
+	if len(del.Keys) != 1 || del.Keys[0] != "live" {
+		t.Fatalf("DEL record names %v, want only the live key", del.Keys)
+	}
+}
+
+// TestAwaitHappensOutsideTheLock is spec §6.4's structural claim. A writer that
+// never completes must not stop an unrelated reader: if Await were inside the
+// commit lock, this test would hang.
+func TestAwaitHappensOutsideTheLock(t *testing.T) {
+	f := &recordingFile{gate: make(chan struct{})}
+	e, _, _ := newLoggedEngine(t, f, aof.Always)
+
+	// Every Write is held open, so this Set reaches Await and stays there. It
+	// must run in its own goroutine: called directly it would block the test
+	// rather than demonstrate anything.
+	stalled := make(chan struct{})
+	go func() { defer close(stalled); _ = e.Set("k", "v", NoExpiry()) }()
+
+	// Give it time to get past the lock and into Await. If Await were inside
+	// the lock, the mutex would still be held when the reader arrives below.
+	time.Sleep(100 * time.Millisecond)
+	select {
+	case <-stalled:
+		t.Fatal("the write completed; the gate did not hold and this test measures nothing")
+	default:
+	}
+
+	// The reader must not be behind the stalled writer.
+	read := make(chan struct{})
+	go func() { defer close(read); e.Get("anything"); e.Exists([]string{"x"}) }()
+
+	select {
+	case <-read:
+	case <-time.After(2 * time.Second):
+		t.Fatal("a reader was blocked behind a stalled disk write; Await is holding the lock")
+	}
+
+	close(f.gate)
+	select {
+	case <-stalled:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the write never completed after the gate opened")
+	}
+}
+
+// TestAlreadyFailedLogRefusesBeforeMemory: the one failure mode where memory is
+// provably untouched, which is why the check happens before the apply.
+func TestAlreadyFailedLogRefusesBeforeMemory(t *testing.T) {
+	f := &failingFile{err: errors.New("disk full")}
+	e, _, fatal := newLoggedEngine(t, f, aof.EverySec)
+
+	// First mutation breaks the log.
+	_ = e.Set("k1", "v1", NoExpiry())
+	select {
+	case <-fatal:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the write failure was never reported")
+	}
+
+	err := e.Set("k2", "v2", NoExpiry())
+	if !errors.Is(err, ErrPersistenceUnavailable) {
+		t.Fatalf("Set against a failed log = %v, want ErrPersistenceUnavailable", err)
+	}
+	if _, ok := e.Get("k2"); ok {
+		t.Fatal("a refused mutation reached memory")
+	}
+}
+
+type failingFile struct{ err error }
+
+func (f *failingFile) Write(p []byte) (int, error) { return 0, f.err }
+func (f *failingFile) Sync() error                 { return nil }
+func (f *failingFile) Close() error                { return nil }
+
+// TestPersistedOrderMatchesAppliedOrder: the append and the apply happen under
+// one acquisition of the lock, so concurrent writers cannot interleave one
+// against the other.
+func TestPersistedOrderMatchesAppliedOrder(t *testing.T) {
+	f := &recordingFile{}
+	e, _, _ := newLoggedEngine(t, f, aof.EverySec)
+
+	const writers, each = 8, 40
+	var wg sync.WaitGroup
+	for w := range writers {
+		wg.Add(1)
+		go func(w int) {
+			defer wg.Done()
+			for i := range each {
+				if err := e.Set("k"+strconv.Itoa(w), strconv.Itoa(i), NoExpiry()); err != nil {
+					t.Errorf("Set: %v", err)
+					return
+				}
+			}
+		}(w)
+	}
+	wg.Wait()
+
+	// Per key, the values must appear in the order that key's writer produced
+	// them. A gap or a reversal means an append and an apply crossed.
+	last := map[string]int{}
+	for _, rec := range f.records(t) {
+		v, err := strconv.Atoi(rec.Value)
+		if err != nil {
+			t.Fatalf("unexpected value %q", rec.Value)
+		}
+		prev, seen := last[rec.Key]
+		if seen && v != prev+1 {
+			t.Fatalf("key %s: recorded %d after %d; persisted order diverged from applied order",
+				rec.Key, v, prev)
+		}
+		last[rec.Key] = v
+	}
+	if len(last) != writers {
+		t.Fatalf("saw %d keys, want %d", len(last), writers)
 	}
 }
