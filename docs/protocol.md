@@ -41,14 +41,21 @@ payload and are returned unaltered.
 
 | Command | Arity | Reply |
 |---|---|---|
-| `PING` | 1 | `+PONG` |
-| `SET key value` | 3 | `+OK` |
+| `PING [message]` | 1–2 | `+PONG`, or `message` as a Bulk String |
+| `SET key value` | ≥3 | `+OK` |
 | `GET key` | 2 | Bulk, or Null Bulk if absent |
 | `DEL key [key ...]` | ≥2 | Integer: keys removed |
 | `EXISTS key [key ...]` | ≥2 | Integer: keys present, duplicates counted |
 
 Command names are case-insensitive. Keys and values are binary-safe: any byte
 sequence is permitted, including NUL and CRLF.
+
+`SET` accepts more than three arguments so that the extra ones can be reported
+as what they are. Everything past the value is an option, and v0.1 implements
+none of them, so any option is answered with `ERR syntax error` — not with a
+wrong-arity error, which would be untrue: `SET key value EX 10` has a legal
+argument count, and the problem is the option, not the count. v0.2 replaces the
+rejection with the `EX`/`PX` parser.
 
 ## Error classes
 
@@ -58,6 +65,7 @@ Conformance tests compare error **class**, not exact message text.
 |---|---|---|
 | unknown command | `ERR unknown command '<name>'` | stays open |
 | wrong arity | `ERR wrong number of arguments for '<name>' command` | stays open |
+| syntax error | `ERR syntax error` | stays open |
 | shutting down | `ERR server is shutting down` | stays open |
 | internal error | `ERR internal error` | stays open |
 | max clients | `ERR max number of clients reached` | **closed** |
@@ -90,8 +98,12 @@ Both are pinned by tests in `internal/command`.
 - `HELLO`, `CLIENT`, `COMMAND`, `INFO`, `SELECT`, `FLUSHDB` and every other
   administrative command are unimplemented and answer with the unknown-command
   error. There is one implicit database and no way to select another.
-- No `SET` options (`EX`, `PX`, `NX`, `XX`, `KEEPTTL`) in v0.1; `EX` and `PX`
-  arrive in v0.2.
+- No `SET` options (`EX`, `PX`, `NX`, `XX`, `GET`, `KEEPTTL`) in v0.1; `EX` and
+  `PX` arrive in v0.2. Redis executes these and we reject them with
+  `ERR syntax error`, so `SET key value EX 10` succeeds there and fails here.
+  This is the one place where a client can send a request both servers consider
+  well-formed and get different outcomes; the conformance suite therefore uses
+  an option Redis rejects too, and this entry carries the rest.
 - An empty request array (`*0`) is a protocol error here and closes the
   connection. The `command` layer also carries an `ERR empty command` reply for
   a zero-argument dispatch, but the decoder rejects `*0` first, so that reply is

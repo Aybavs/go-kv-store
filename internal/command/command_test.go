@@ -38,6 +38,62 @@ func TestCommandNameIsCaseInsensitive(t *testing.T) {
 	}
 }
 
+// TestPingWithMessage pins PING's optional message. Redis answers a bare PING
+// with the status PONG and a PING carrying one argument with that argument as a
+// bulk string; the two reply types are not interchangeable to a client.
+func TestPingWithMessage(t *testing.T) {
+	r, _ := newTestRegistry(t)
+
+	got := r.Dispatch(args("PING", "hello"))
+	if got.Kind != ReplyBulk {
+		t.Fatalf("got %+v, want bulk reply", got)
+	}
+	if got.Str != "hello" {
+		t.Fatalf("got %q, want %q", got.Str, "hello")
+	}
+
+	// The message is binary-safe and is not interpreted.
+	if got := r.Dispatch(args("PING", "a\x00\r\nb")); got.Str != "a\x00\r\nb" {
+		t.Fatalf("binary message: got %q", got.Str)
+	}
+
+	// Two arguments is still wrong arity: the message is optional, not variadic.
+	if got := r.Dispatch(args("PING", "a", "b")); got.Kind != ReplyError {
+		t.Fatalf("PING a b = %+v, want error reply", got)
+	}
+}
+
+// TestSetRejectsOptions pins the arity/option split. v0.1 implements no SET
+// options, and the argument count for "SET k v EX 10" is legal by Redis's
+// rules, so the rejection must name the real problem rather than blaming the
+// count. v0.2 turns this branch into the option parser.
+func TestSetRejectsOptions(t *testing.T) {
+	r, e := newTestRegistry(t)
+
+	for _, extra := range [][]string{{"extra"}, {"EX", "10"}, {"NX"}, {"KEEPTTL"}} {
+		call := append([]string{"SET", "k", "v"}, extra...)
+		got := r.Dispatch(args(call...))
+		if got.Kind != ReplyError {
+			t.Fatalf("SET with %v: got %+v, want error reply", extra, got)
+		}
+		if want := "ERR syntax error"; got.Str != want {
+			t.Fatalf("SET with %v: got %q, want %q", extra, got.Str, want)
+		}
+	}
+
+	// A rejected SET must not have written anything.
+	if _, ok := e.Get("k"); ok {
+		t.Fatal("a rejected SET stored the key anyway")
+	}
+
+	// Two arguments is still wrong arity, not a syntax error: nothing has been
+	// supplied to misinterpret as an option.
+	got := r.Dispatch(args("SET", "k"))
+	if want := "ERR wrong number of arguments for 'set' command"; got.Str != want {
+		t.Fatalf("SET k: got %q, want %q", got.Str, want)
+	}
+}
+
 // TestUnknownCommand pins the two halves of the error-casing contract that
 // docs/protocol.md documents: an unknown name is echoed exactly as the client
 // sent it, because there is no canonical form for a command we do not know.
@@ -83,9 +139,11 @@ func TestUnknownCommandNameIsBounded(t *testing.T) {
 // client's casing.
 func TestWrongArity(t *testing.T) {
 	r, _ := newTestRegistry(t)
+	// PING takes an optional message, so two arguments is a legal call; three
+	// is not.
 	for _, sent := range []string{"PING", "ping", "PiNg"} {
 		t.Run(sent, func(t *testing.T) {
-			got := r.Dispatch(args(sent, "extra"))
+			got := r.Dispatch(args(sent, "a", "b"))
 			if got.Kind != ReplyError {
 				t.Fatalf("got %+v, want error reply", got)
 			}
