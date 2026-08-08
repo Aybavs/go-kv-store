@@ -15,7 +15,7 @@ func BenchmarkEngineSet(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		if err := e.Set("key", "value"); err != nil {
+		if err := e.Set("key", "value", NoExpiry()); err != nil {
 			b.Fatal(err)
 		}
 	}
@@ -23,7 +23,7 @@ func BenchmarkEngineSet(b *testing.B) {
 
 func BenchmarkEngineGet(b *testing.B) {
 	e := benchEngine(b)
-	_ = e.Set("key", "value")
+	_ = e.Set("key", "value", NoExpiry())
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
@@ -36,7 +36,7 @@ func BenchmarkEngineGet(b *testing.B) {
 func BenchmarkEngineParallelReads(b *testing.B) {
 	e := benchEngine(b)
 	for i := 0; i < 1000; i++ {
-		_ = e.Set("key"+strconv.Itoa(i), "value")
+		_ = e.Set("key"+strconv.Itoa(i), "value", NoExpiry())
 	}
 	b.ReportAllocs()
 	b.ResetTimer()
@@ -54,7 +54,7 @@ func BenchmarkEngineParallelReads(b *testing.B) {
 func BenchmarkEngineParallelMixed(b *testing.B) {
 	e := benchEngine(b)
 	for i := 0; i < 1000; i++ {
-		_ = e.Set("key"+strconv.Itoa(i), "value")
+		_ = e.Set("key"+strconv.Itoa(i), "value", NoExpiry())
 	}
 	b.ReportAllocs()
 	b.ResetTimer()
@@ -63,7 +63,7 @@ func BenchmarkEngineParallelMixed(b *testing.B) {
 		for pb.Next() {
 			k := "key" + strconv.Itoa(i%1000)
 			if i%10 == 0 {
-				if err := e.Set(k, "value"); err != nil {
+				if err := e.Set(k, "value", NoExpiry()); err != nil {
 					b.Error(err)
 					return
 				}

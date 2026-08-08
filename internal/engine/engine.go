@@ -5,6 +5,7 @@
 package engine
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"runtime/debug"
@@ -18,6 +19,31 @@ import (
 // begun shutting down.
 var ErrDraining = errors.New("server is shutting down")
 
+// TTLStatus is engine's own, deliberately not store's: no store type crosses
+// this boundary, so command never has to import the storage layer to read a
+// reply.
+type TTLStatus int
+
+const (
+	NoKey TTLStatus = iota
+	NoTTL
+	HasTTL
+)
+
+// TTL is how a caller expresses "with this expiry" or "with none" without a
+// sentinel duration. Its zero value means no expiry, so a Set that forgets to
+// mention TTL clears one rather than inventing an arbitrary deadline.
+type TTL struct {
+	d   time.Duration
+	set bool
+}
+
+// NoExpiry says the key must not carry a TTL. On an existing key it clears one.
+func NoExpiry() TTL { return TTL{} }
+
+// ExpiresIn says the key expires d from the moment the mutation is applied.
+func ExpiresIn(d time.Duration) TTL { return TTL{d: d, set: true} }
+
 type Engine struct {
 	mu                 sync.RWMutex
 	store              *store.Store
@@ -29,6 +55,12 @@ type Engine struct {
 	// same reason onFatal is: TTL behaviour is otherwise only testable by
 	// sleeping, and this project has twice been bitten by tests that wait.
 	now func() time.Time
+
+	// The worker's lifecycle is guarded separately from the data lock: stopping
+	// it must not have to wait behind a sweep that is holding mu.
+	expMu   sync.Mutex
+	expStop chan struct{}
+	expDone chan struct{}
 }
 
 // New returns an Engine. onFatal is called when an invariant of the shared
@@ -92,15 +124,65 @@ func (e *Engine) Exists(keys []string) int {
 	return n
 }
 
-func (e *Engine) Set(key, value string) error {
+// Set writes key. A TTL of NoExpiry clears any expiry the key already had,
+// which is Redis's rule: a SET with no expiry option is not "leave the old TTL
+// alone".
+func (e *Engine) Set(key, value string, ttl TTL) error {
 	defer e.guard()
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if !e.acceptingMutations {
 		return ErrDraining
 	}
-	e.store.Set(key, value, time.Time{}, false)
+	var deadline time.Time
+	if ttl.set {
+		// Computed inside the lock, so the deadline is measured from the
+		// instant the write actually lands rather than from when the command
+		// arrived.
+		deadline = e.now().Add(ttl.d)
+	}
+	e.store.Set(key, value, deadline, ttl.set)
 	return nil
+}
+
+// TTL reports the time left on key. The duration is meaningful only when the
+// status is HasTTL. A key whose deadline has passed reports NoKey, whether or
+// not the worker has reclaimed it yet.
+func (e *Engine) TTL(key string) (time.Duration, TTLStatus) {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	d, st := e.store.TTL(key, e.now())
+	switch st {
+	case store.HasTTL:
+		return d, HasTTL
+	case store.NoTTL:
+		return 0, NoTTL
+	default:
+		return 0, NoKey
+	}
+}
+
+// Expire attaches a deadline to an existing key and reports whether it applied.
+func (e *Engine) Expire(key string, d time.Duration) (bool, error) {
+	defer e.guard()
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if !e.acceptingMutations {
+		return false, ErrDraining
+	}
+	now := e.now()
+	return e.store.Expire(key, now.Add(d), now), nil
+}
+
+// Persist removes a key's deadline and reports whether there was one.
+func (e *Engine) Persist(key string) (bool, error) {
+	defer e.guard()
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if !e.acceptingMutations {
+		return false, ErrDraining
+	}
+	return e.store.Persist(key, e.now()), nil
 }
 
 // Delete removes every listed key and reports how many were present. The whole
@@ -113,9 +195,13 @@ func (e *Engine) Delete(keys []string) (int, error) {
 	if !e.acceptingMutations {
 		return 0, ErrDraining
 	}
+	now := e.now()
 	n := 0
 	for _, k := range keys {
-		if e.store.Delete(k) {
+		// An expired key is already absent to callers, so it must not be
+		// counted as removed even though deleting it reclaims the entry.
+		_, live := e.store.Get(k, now)
+		if e.store.Delete(k) && live {
 			n++
 		}
 	}
@@ -130,4 +216,87 @@ func (e *Engine) BeginDrain() {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.acceptingMutations = false
+}
+
+// Interval and sample size are starting points, not values copied from Redis.
+// The spec's guarantee is only that work per cycle is bounded and reclamation
+// is eventual, so these are tuned by measurement if measurement ever asks.
+const (
+	expirationInterval = 100 * time.Millisecond
+	expirationSample   = 20
+)
+
+// StartExpiration runs the active expiration worker. It reclaims memory; it is
+// not what makes an expired key disappear. Keys become invisible the moment
+// their deadline passes, on the read path, whether or not this ever runs.
+func (e *Engine) StartExpiration() {
+	ticker := time.NewTicker(expirationInterval)
+	e.startExpiration(ticker.C, ticker.Stop)
+}
+
+// startExpiration takes its tick source from the caller so tests can drive
+// cycles exactly rather than waiting for a real interval to elapse.
+func (e *Engine) startExpiration(ticks <-chan time.Time, cleanup func()) {
+	e.expMu.Lock()
+	defer e.expMu.Unlock()
+	if e.expStop != nil {
+		return // already running
+	}
+	stop, done := make(chan struct{}), make(chan struct{})
+	e.expStop, e.expDone = stop, done
+
+	go func() {
+		defer close(done)
+		if cleanup != nil {
+			defer cleanup()
+		}
+		for {
+			select {
+			case <-stop:
+				return
+			case <-ticks:
+				e.reclaimOnce()
+			}
+		}
+	}()
+}
+
+// reclaimOnce takes the write lock for one bounded sweep. It does not consult
+// the admission gate: reclamation is not a client mutation, and refusing it
+// with ErrDraining would conflate two different things. The worker is stopped
+// before the gate closes instead.
+func (e *Engine) reclaimOnce() (removed, examined int) {
+	defer e.guard()
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.store.ReclaimExpired(e.now(), expirationSample)
+}
+
+// StopExpiration stops the worker and waits for the cycle in flight. It is safe
+// to call when the worker was never started, and safe to call twice.
+func (e *Engine) StopExpiration(ctx context.Context) error {
+	e.expMu.Lock()
+	stop, done := e.expStop, e.expDone
+	e.expStop, e.expDone = nil, nil
+	e.expMu.Unlock()
+
+	if stop == nil {
+		return nil
+	}
+	close(stop)
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// physicalLen reports how many entries are still held, expired or not. It
+// exists for the reclamation tests: every public count deliberately hides
+// expired keys, which is exactly what those tests need to see through.
+func (e *Engine) physicalLen() int {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.store.PhysicalLen()
 }

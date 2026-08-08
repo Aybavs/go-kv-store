@@ -158,3 +158,8 @@ func (s *Store) ReclaimExpired(now time.Time, limit int) (removed, examined int)
 	}
 	return removed, examined
 }
+
+// PhysicalLen reports the number of entries held, including ones whose deadline
+// has passed but which have not been reclaimed. Len is the caller-facing count;
+// this one exists so reclamation can be observed at all.
+func (s *Store) PhysicalLen() int { return len(s.data) }
