@@ -45,12 +45,35 @@ func (r *Registry) Dispatch(args [][]byte) Reply {
 	name := strings.ToUpper(string(args[0]))
 	sp, ok := r.cmds[name]
 	if !ok {
-		return Err("ERR unknown command '" + name + "'")
+		// Redis echoes the name exactly as the client sent it here, casing and
+		// all, because there is no canonical form for a command it does not
+		// know. We match that.
+		return Err("ERR unknown command '" + echoName(args[0]) + "'")
 	}
 	if len(args) < sp.minArgs || (sp.maxArgs >= 0 && len(args) > sp.maxArgs) {
-		return Err("ERR wrong number of arguments for '" + name + "' command")
+		// The command is known, so there is a canonical form. Redis uses it,
+		// lowercased, rather than repeating the client's casing.
+		return Err("ERR wrong number of arguments for '" + strings.ToLower(name) + "' command")
 	}
 	return sp.run(r.engine, args)
+}
+
+// maxEchoedName bounds how much of an unknown command name is quoted back to
+// the client. A name may be as long as the configured bulk-string limit — 64
+// MiB by default — and reflecting one of those in full would let a client
+// amplify a single request into a reply of its own choosing. Redis bounds the
+// same text for the same reason.
+const maxEchoedName = 128
+
+// echoName renders a client-supplied command name for an error reply. The
+// result is a bounded byte string, not necessarily valid UTF-8: truncation is
+// applied at a byte offset and the name itself may be arbitrary binary. The
+// encoder neutralises CR and LF, so no content here can affect framing.
+func echoName(b []byte) string {
+	if len(b) > maxEchoedName {
+		return string(b[:maxEchoedName]) + "..."
+	}
+	return string(b)
 }
 
 // mutationError maps engine mutation failures to client-visible replies.

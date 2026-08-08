@@ -1,6 +1,7 @@
 package command
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/aybavs/go-kv-store/internal/engine"
@@ -37,25 +38,61 @@ func TestCommandNameIsCaseInsensitive(t *testing.T) {
 	}
 }
 
+// TestUnknownCommand pins the two halves of the error-casing contract that
+// docs/protocol.md documents: an unknown name is echoed exactly as the client
+// sent it, because there is no canonical form for a command we do not know.
 func TestUnknownCommand(t *testing.T) {
 	r, _ := newTestRegistry(t)
-	got := r.Dispatch(args("NOPE", "x"))
-	if got.Kind != ReplyError {
-		t.Fatalf("got %+v, want error reply", got)
-	}
-	if want := "ERR unknown command 'NOPE'"; got.Str != want {
-		t.Fatalf("got %q, want %q", got.Str, want)
+	for _, sent := range []string{"NOPE", "nope", "NoPe"} {
+		t.Run(sent, func(t *testing.T) {
+			got := r.Dispatch(args(sent, "x"))
+			if got.Kind != ReplyError {
+				t.Fatalf("got %+v, want error reply", got)
+			}
+			if want := "ERR unknown command '" + sent + "'"; got.Str != want {
+				t.Fatalf("got %q, want %q", got.Str, want)
+			}
+		})
 	}
 }
 
-func TestWrongArity(t *testing.T) {
+// TestUnknownCommandNameIsBounded pins the amplification bound. A name may be
+// as long as the bulk-string limit; only a bounded prefix comes back.
+func TestUnknownCommandNameIsBounded(t *testing.T) {
 	r, _ := newTestRegistry(t)
-	got := r.Dispatch(args("PING", "extra"))
+	long := strings.Repeat("Z", maxEchoedName*4)
+
+	got := r.Dispatch(args(long))
 	if got.Kind != ReplyError {
 		t.Fatalf("got %+v, want error reply", got)
 	}
-	if want := "ERR wrong number of arguments for 'PING' command"; got.Str != want {
-		t.Fatalf("got %q, want %q", got.Str, want)
+	want := "ERR unknown command '" + strings.Repeat("Z", maxEchoedName) + "...'"
+	if got.Str != want {
+		t.Fatalf("got %d bytes %q, want %d bytes", len(got.Str), got.Str, len(want))
+	}
+
+	// A name exactly at the bound is quoted whole, with no ellipsis.
+	exact := strings.Repeat("Z", maxEchoedName)
+	if got := r.Dispatch(args(exact)); got.Str != "ERR unknown command '"+exact+"'" {
+		t.Fatalf("name of exactly maxEchoedName bytes was altered: %q", got.Str)
+	}
+}
+
+// TestWrongArity pins the other half: the command is known, so it has a
+// canonical form, and Redis reports that lowercased rather than repeating the
+// client's casing.
+func TestWrongArity(t *testing.T) {
+	r, _ := newTestRegistry(t)
+	for _, sent := range []string{"PING", "ping", "PiNg"} {
+		t.Run(sent, func(t *testing.T) {
+			got := r.Dispatch(args(sent, "extra"))
+			if got.Kind != ReplyError {
+				t.Fatalf("got %+v, want error reply", got)
+			}
+			if want := "ERR wrong number of arguments for 'ping' command"; got.Str != want {
+				t.Fatalf("got %q, want %q", got.Str, want)
+			}
+		})
 	}
 }
 
