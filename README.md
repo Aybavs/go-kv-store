@@ -3,7 +3,7 @@
 [![CI](https://github.com/aybavs/go-kv-store/actions/workflows/ci.yml/badge.svg)](https://github.com/aybavs/go-kv-store/actions/workflows/ci.yml)
 [![Go Version](https://img.shields.io/github/go-mod/go-version/aybavs/go-kv-store)](go.mod)
 [![Release](https://img.shields.io/github/v/release/aybavs/go-kv-store)](https://github.com/aybavs/go-kv-store/releases)
-[![License](https://img.shields.io/github/license/aybavs/go-kv-store)](LICENSE)
+[![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
 A Redis-inspired in-memory key-value store built from scratch in Go to explore
 TCP networking, concurrency, protocol design, expiration, persistence and
