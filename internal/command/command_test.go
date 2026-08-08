@@ -1,8 +1,11 @@
 package command
 
 import (
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/aybavs/go-kv-store/internal/engine"
 )
@@ -62,29 +65,23 @@ func TestPingWithMessage(t *testing.T) {
 	}
 }
 
-// The argument count for "SET k v EX 10" is legal by Redis's rules, so the
-// rejection must name the option rather than blame the count.
-func TestSetRejectsOptions(t *testing.T) {
-	r, e := newTestRegistry(t)
+// TestSetRejectionWritesNothing keeps the two halves the v0.1 version of this
+// test pinned that are still true now that EX and PX are implemented: an
+// unrecognised option is a syntax error and stores nothing, and too few
+// arguments is still an arity error rather than a syntax one. The per-option
+// error text moved to TestSetOptionErrors, which checks it against Redis.
+func TestSetRejectionWritesNothing(t *testing.T) {
+	r, _ := clockedRegistry(t)
 
-	for _, extra := range [][]string{{"extra"}, {"EX", "10"}, {"NX"}, {"KEEPTTL"}} {
-		call := append([]string{"SET", "k", "v"}, extra...)
-		got := r.Dispatch(args(call...))
-		if got.Kind != ReplyError {
-			t.Fatalf("SET with %v: got %+v, want error reply", extra, got)
-		}
-		if want := "ERR syntax error"; got.Str != want {
-			t.Fatalf("SET with %v: got %q, want %q", extra, got.Str, want)
-		}
+	if got := r.Dispatch(args("SET", "k", "v", "KEEPTTL")); got.Str != "ERR syntax error" {
+		t.Fatalf("unimplemented option: got %q", got.Str)
 	}
-
-	// A rejected SET must not have written anything.
-	if _, ok := e.Get("k"); ok {
+	if got := r.Dispatch(args("GET", "k")); got.Kind != ReplyNullBulk {
 		t.Fatal("a rejected SET stored the key anyway")
 	}
 
-	// Two arguments is still wrong arity, not a syntax error: nothing has been
-	// supplied to misinterpret as an option.
+	// Nothing has been supplied to misinterpret as an option here, so this is
+	// an arity error.
 	got := r.Dispatch(args("SET", "k"))
 	if want := "ERR wrong number of arguments for 'set' command"; got.Str != want {
 		t.Fatalf("SET k: got %q, want %q", got.Str, want)
@@ -325,5 +322,200 @@ func TestEmptyValueIsNotAMissingKey(t *testing.T) {
 
 	if got := r.Dispatch(args("EXISTS", "empty")); got.Kind != ReplyInt || got.Int != 1 {
 		t.Fatalf("EXISTS on a key holding an empty value = %+v, want integer 1", got)
+	}
+}
+
+// clockedRegistry gives the command tests a clock they move by hand, so expiry
+// is reached by advancing time rather than by waiting for it.
+func clockedRegistry(t *testing.T) (*Registry, func(time.Duration)) {
+	t.Helper()
+	var mu sync.Mutex
+	now := time.Date(2026, 8, 8, 12, 0, 0, 0, time.UTC)
+	e := engine.NewWithClock(
+		func(err error) { t.Errorf("unexpected fatal: %v", err) },
+		func() time.Time { mu.Lock(); defer mu.Unlock(); return now },
+	)
+	advance := func(d time.Duration) { mu.Lock(); now = now.Add(d); mu.Unlock() }
+	return New(e), advance
+}
+
+// TestSetOptionErrors pins each error against the text Redis produces. Every row
+// was measured against Redis 7 before it was written here, including the two
+// that contradicted what the plan assumed: repeating EX is accepted, and an
+// out-of-range value is an invalid-expire-time error rather than a
+// not-an-integer one.
+func TestSetOptionErrors(t *testing.T) {
+	cases := []struct {
+		call []string
+		want string
+	}{
+		{[]string{"SET", "k", "v", "EX", "0"}, "ERR invalid expire time in 'set' command"},
+		{[]string{"SET", "k", "v", "EX", "-1"}, "ERR invalid expire time in 'set' command"},
+		{[]string{"SET", "k", "v", "PX", "0"}, "ERR invalid expire time in 'set' command"},
+		{[]string{"SET", "k", "v", "EX", "9999999999999999"}, "ERR invalid expire time in 'set' command"},
+		{[]string{"SET", "k", "v", "EX", "abc"}, "ERR value is not an integer or out of range"},
+		{[]string{"SET", "k", "v", "EX"}, "ERR syntax error"},
+		{[]string{"SET", "k", "v", "EX", "10", "PX", "100"}, "ERR syntax error"},
+		{[]string{"SET", "k", "v", "PX", "100", "EX", "10"}, "ERR syntax error"},
+		{[]string{"SET", "k", "v", "BOGUS"}, "ERR syntax error"},
+		{[]string{"SET", "k", "v", "NX"}, "ERR syntax error"},
+	}
+	for _, tc := range cases {
+		t.Run(strings.Join(tc.call[3:], " "), func(t *testing.T) {
+			r, _ := clockedRegistry(t)
+			got := r.Dispatch(args(tc.call...))
+			if got.Kind != ReplyError || got.Str != tc.want {
+				t.Fatalf("got %+v, want error %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestSetRepeatedOptionIsAccepted: Redis takes the last one. Measured, because
+// rejecting a repeat is the more natural thing to implement.
+func TestSetRepeatedOptionIsAccepted(t *testing.T) {
+	r, advance := clockedRegistry(t)
+	if got := r.Dispatch(args("SET", "k", "v", "EX", "10", "EX", "100")); got.Kind != ReplySimple {
+		t.Fatalf("got %+v, want OK", got)
+	}
+	advance(50 * time.Second)
+	if got := r.Dispatch(args("GET", "k")); got.Kind != ReplyBulk {
+		t.Fatalf("the first EX won; key gone after 50s though the last said 100")
+	}
+}
+
+func TestSetWithExpiry(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		call []string
+		gone time.Duration
+	}{
+		{"EX", []string{"SET", "k", "v", "EX", "10"}, 10 * time.Second},
+		{"PX", []string{"SET", "k", "v", "PX", "1500"}, 1500 * time.Millisecond},
+		{"lowercase option", []string{"SET", "k", "v", "ex", "10"}, 10 * time.Second},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r, advance := clockedRegistry(t)
+			if got := r.Dispatch(args(tc.call...)); got.Kind != ReplySimple {
+				t.Fatalf("got %+v, want OK", got)
+			}
+			advance(tc.gone - time.Nanosecond)
+			if got := r.Dispatch(args("GET", "k")); got.Kind != ReplyBulk {
+				t.Fatal("key vanished before its deadline")
+			}
+			advance(time.Nanosecond)
+			if got := r.Dispatch(args("GET", "k")); got.Kind != ReplyNullBulk {
+				t.Fatalf("got %+v at the deadline, want a null bulk", got)
+			}
+		})
+	}
+}
+
+func TestSetWithoutOptionsClearsTTL(t *testing.T) {
+	r, advance := clockedRegistry(t)
+	r.Dispatch(args("SET", "k", "v", "EX", "10"))
+	r.Dispatch(args("SET", "k", "v2"))
+
+	advance(time.Hour)
+	if got := r.Dispatch(args("GET", "k")); got.Kind != ReplyBulk {
+		t.Fatal("key expired although the second SET carried no option")
+	}
+	if got := r.Dispatch(args("TTL", "k")); got.Int != -1 {
+		t.Fatalf("TTL = %d, want -1", got.Int)
+	}
+}
+
+// TestTTLRounding pins the formula measured against Redis: (ms+500)/1000,
+// nearest rather than up. A key set with PX 1500 reports 1, not 2.
+func TestTTLRounding(t *testing.T) {
+	cases := []struct {
+		px   int
+		want int64
+	}{
+		{400, 0}, {600, 1}, {999, 1}, {1400, 1}, {1500, 2}, {1600, 2}, {2400, 2}, {2600, 3},
+	}
+	for _, tc := range cases {
+		t.Run(strconv.Itoa(tc.px)+"ms", func(t *testing.T) {
+			r, _ := clockedRegistry(t)
+			r.Dispatch(args("SET", "k", "v", "PX", strconv.Itoa(tc.px)))
+			// The clock has not moved, so the remaining time is exactly px.
+			got := r.Dispatch(args("TTL", "k"))
+			if got.Kind != ReplyInt || got.Int != tc.want {
+				t.Fatalf("PX %d: TTL = %d, want %d", tc.px, got.Int, tc.want)
+			}
+		})
+	}
+}
+
+func TestTTLStatusReplies(t *testing.T) {
+	r, _ := clockedRegistry(t)
+	r.Dispatch(args("SET", "plain", "v"))
+
+	if got := r.Dispatch(args("TTL", "absent")); got.Int != -2 {
+		t.Fatalf("missing key: TTL = %d, want -2", got.Int)
+	}
+	if got := r.Dispatch(args("TTL", "plain")); got.Int != -1 {
+		t.Fatalf("key without a TTL: TTL = %d, want -1", got.Int)
+	}
+}
+
+// TestExpireNonPositiveDeletes is Redis's behaviour and the second thing the
+// plan flagged as likely misremembered: EXPIRE with 0 or a negative value does
+// not refuse, it deletes and reports 1.
+func TestExpireNonPositiveDeletes(t *testing.T) {
+	for _, secs := range []string{"0", "-1", "-100"} {
+		t.Run(secs, func(t *testing.T) {
+			r, _ := clockedRegistry(t)
+			r.Dispatch(args("SET", "k", "v"))
+
+			got := r.Dispatch(args("EXPIRE", "k", secs))
+			if got.Kind != ReplyInt || got.Int != 1 {
+				t.Fatalf("EXPIRE k %s = %+v, want 1", secs, got)
+			}
+			if got := r.Dispatch(args("GET", "k")); got.Kind != ReplyNullBulk {
+				t.Fatal("key survived a non-positive EXPIRE")
+			}
+			// A missing key still reports 0, not 1.
+			if got := r.Dispatch(args("EXPIRE", "absent", secs)); got.Int != 0 {
+				t.Fatalf("EXPIRE on a missing key = %d, want 0", got.Int)
+			}
+		})
+	}
+}
+
+func TestExpireAndPersistReplies(t *testing.T) {
+	r, advance := clockedRegistry(t)
+	r.Dispatch(args("SET", "k", "v"))
+
+	if got := r.Dispatch(args("EXPIRE", "k", "10")); got.Int != 1 {
+		t.Fatalf("EXPIRE = %d, want 1", got.Int)
+	}
+	if got := r.Dispatch(args("EXPIRE", "absent", "10")); got.Int != 0 {
+		t.Fatalf("EXPIRE on a missing key = %d, want 0", got.Int)
+	}
+	if got := r.Dispatch(args("PERSIST", "k")); got.Int != 1 {
+		t.Fatalf("PERSIST = %d, want 1", got.Int)
+	}
+	if got := r.Dispatch(args("PERSIST", "k")); got.Int != 0 {
+		t.Fatalf("second PERSIST = %d, want 0", got.Int)
+	}
+	advance(time.Hour)
+	if got := r.Dispatch(args("GET", "k")); got.Kind != ReplyBulk {
+		t.Fatal("key expired after PERSIST removed its TTL")
+	}
+}
+
+func TestExpirationCommandArity(t *testing.T) {
+	r, _ := clockedRegistry(t)
+	for _, call := range [][]string{
+		{"EXPIRE", "k"}, {"EXPIRE", "k", "1", "extra"},
+		{"TTL"}, {"TTL", "k", "extra"},
+		{"PERSIST"}, {"PERSIST", "k", "extra"},
+	} {
+		got := r.Dispatch(args(call...))
+		want := "ERR wrong number of arguments for '" + strings.ToLower(call[0]) + "' command"
+		if got.Kind != ReplyError || got.Str != want {
+			t.Fatalf("%v: got %+v, want %q", call, got, want)
+		}
 	}
 }

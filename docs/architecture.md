@@ -74,6 +74,35 @@ The quoted text is bounded as well as sanitised. Values may be as large as the
 bulk-string limit, so an unbounded echo would let a small request produce a
 large reply.
 
+## Expiration
+
+> Logical expiration and physical deletion are separate events.
+
+A key is absent from the client's perspective the moment its deadline passes.
+That is decided on the read path, under `RLock`, by comparing the deadline
+against the clock — no write lock, no deletion. Reclaiming the memory is the
+active worker's job and happens later.
+
+Collapsing the two would be the easy mistake. A read that deleted what it found
+expired would turn every `GET` into a potential writer, and would make the
+worker's timing observable: a client could infer when reclamation last ran from
+how a `DEL` counted. Two tests pin the separation directly, asserting both that
+the key is invisible and that its entry is still physically present.
+
+`store` keeps a second map holding only TTL-bearing keys. That index is what
+makes bounded reclamation viable — sampling the main map finds nothing when
+expiring keys are sparse. No claim is made about *which* keys a cycle examines;
+Go's map iteration order is not a randomness contract. The guarantee is that
+work per cycle is bounded and reclamation is eventual.
+
+The worker is stopped before the mutation admission gate closes, not refused by
+it. Reclamation is not a client mutation, and routing it through `ErrDraining`
+would conflate two different things.
+
+`store` never reads the clock — time is a parameter — and `engine` takes its
+clock at construction. Both exist so that expiry is reachable in tests by moving
+time rather than by waiting for it.
+
 ## Concurrency model
 
 One goroutine per connection. All shared state is behind a single

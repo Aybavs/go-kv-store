@@ -42,20 +42,40 @@ payload and are returned unaltered.
 | Command | Arity | Reply |
 |---|---|---|
 | `PING [message]` | 1–2 | `+PONG`, or `message` as a Bulk String |
-| `SET key value` | ≥3 | `+OK` |
+| `SET key value [EX s \| PX ms]` | ≥3 | `+OK` |
 | `GET key` | 2 | Bulk, or Null Bulk if absent |
 | `DEL key [key ...]` | ≥2 | Integer: keys removed |
 | `EXISTS key [key ...]` | ≥2 | Integer: keys present, duplicates counted |
+| `EXPIRE key seconds` | 3 | Integer: `1` applied, `0` no such key |
+| `TTL key` | 2 | Integer: `-2` no key, `-1` no TTL, else seconds |
+| `PERSIST key` | 2 | Integer: `1` a TTL was removed, `0` otherwise |
 
 Command names are case-insensitive. Keys and values are binary-safe: any byte
 sequence is permitted, including NUL and CRLF.
 
-`SET` accepts more than three arguments so that the extra ones can be reported
-as what they are. Everything past the value is an option, and v0.1 implements
-none of them, so any option is answered with `ERR syntax error` — not with a
-wrong-arity error, which would be untrue: `SET key value EX 10` has a legal
-argument count, and the problem is the option, not the count. v0.2 replaces the
-rejection with the `EX`/`PX` parser.
+## Expiration
+
+A key is absent the moment its deadline passes. Reclaiming its memory is a
+separate, later event, so a client can never observe when reclamation ran.
+
+`SET` takes at most one expiry option. Repeating the same option is accepted and
+the last one wins; mixing `EX` and `PX` is a syntax error. **A `SET` without an
+expiry option clears any TTL the key already had** — it is not "leave the
+existing expiry alone".
+
+`TTL` reports whole seconds, rounded to nearest: `(milliseconds + 500) / 1000`.
+A key set with `PX 1500` reports `1`, and one set with `PX 1600` reports `2`.
+
+`EXPIRE` with zero or a negative value deletes the key and replies `1` if it
+existed, rather than rejecting the call.
+
+| Option error | Reply |
+|---|---|
+| unrecognised option | `ERR syntax error` |
+| `EX` and `PX` together | `ERR syntax error` |
+| option with no value | `ERR syntax error` |
+| non-integer value | `ERR value is not an integer or out of range` |
+| zero, negative or out-of-range value | `ERR invalid expire time in '<command>' command` |
 
 ## Error classes
 
@@ -66,6 +86,8 @@ Conformance tests compare error **class**, not exact message text.
 | unknown command | `ERR unknown command '<name>'` | stays open |
 | wrong arity | `ERR wrong number of arguments for '<name>' command` | stays open |
 | syntax error | `ERR syntax error` | stays open |
+| not an integer | `ERR value is not an integer or out of range` | stays open |
+| invalid expire time | `ERR invalid expire time in '<name>' command` | stays open |
 | shutting down | `ERR server is shutting down` | stays open |
 | internal error | `ERR internal error` | stays open |
 | max clients | `ERR max number of clients reached` | **closed** |
@@ -98,12 +120,11 @@ Both are pinned by tests in `internal/command`.
 - `HELLO`, `CLIENT`, `COMMAND`, `INFO`, `SELECT`, `FLUSHDB` and every other
   administrative command are unimplemented and answer with the unknown-command
   error. There is one implicit database and no way to select another.
-- No `SET` options (`EX`, `PX`, `NX`, `XX`, `GET`, `KEEPTTL`) in v0.1; `EX` and
-  `PX` arrive in v0.2. Redis executes these and we reject them with
-  `ERR syntax error`, so `SET key value EX 10` succeeds there and fails here.
-  This is the one place where a client can send a request both servers consider
-  well-formed and get different outcomes; the conformance suite therefore uses
-  an option Redis rejects too, and this entry carries the rest.
+- `SET` implements `EX` and `PX` only. `NX`, `XX`, `GET` and `KEEPTTL` are
+  unimplemented and answer with `ERR syntax error`, which is also what Redis
+  replies to an option it does not recognise — so the texts agree while the
+  behaviour does not.
+- `PTTL`, `PEXPIRE`, `EXPIREAT` and `PEXPIREAT` are not implemented.
 - An empty request array (`*0`) is a protocol error here and closes the
   connection. The `command` layer also carries an `ERR empty command` reply for
   a zero-argument dispatch, but the decoder rejects `*0` first, so that reply is

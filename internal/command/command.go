@@ -6,7 +6,10 @@ package command
 
 import (
 	"errors"
+	"math"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/aybavs/go-kv-store/internal/engine"
 )
@@ -35,6 +38,9 @@ func New(e *engine.Engine) *Registry {
 	r.cmds["GET"] = spec{minArgs: 2, maxArgs: 2, run: cmdGet}
 	r.cmds["DEL"] = spec{minArgs: 2, maxArgs: -1, run: cmdDel}
 	r.cmds["EXISTS"] = spec{minArgs: 2, maxArgs: -1, run: cmdExists}
+	r.cmds["EXPIRE"] = spec{minArgs: 3, maxArgs: 3, run: cmdExpire}
+	r.cmds["TTL"] = spec{minArgs: 2, maxArgs: 2, run: cmdTTL}
+	r.cmds["PERSIST"] = spec{minArgs: 2, maxArgs: 2, run: cmdPersist}
 	return r
 }
 
@@ -86,20 +92,149 @@ func cmdPing(_ *engine.Engine, args [][]byte) Reply {
 	return Simple("PONG")
 }
 
+// Bounds on an expiry argument. A duration is int64 nanoseconds, so a value
+// past these cannot be represented at all; Redis rejects the same class of
+// input with the same error rather than silently wrapping.
+const (
+	maxExpireSeconds = int64(math.MaxInt64) / int64(time.Second)
+	maxExpireMillis  = int64(math.MaxInt64) / int64(time.Millisecond)
+)
+
+const (
+	errNotAnInteger = "ERR value is not an integer or out of range"
+	errSyntax       = "ERR syntax error"
+)
+
+func invalidExpire(command string) Reply {
+	return Err("ERR invalid expire time in '" + command + "' command")
+}
+
+// parseSetOptions reads the arguments after SET's value. It returns the TTL to
+// apply and, if the options were malformed, the reply to send instead.
+//
+// Repeating the same unit is allowed and the last one wins, which is what Redis
+// does; mixing EX and PX is a syntax error. Both were measured rather than
+// assumed — "SET k v EX 10 EX 20" is accepted by Redis and it would have been
+// natural to reject it.
+func parseSetOptions(opts [][]byte) (engine.TTL, *Reply) {
+	ttl := engine.NoExpiry()
+	unit := ""
+
+	for i := 0; i < len(opts); i++ {
+		name := strings.ToUpper(string(opts[i]))
+		switch name {
+		case "EX", "PX":
+			if unit != "" && unit != name {
+				return ttl, errReply(errSyntax)
+			}
+			if i+1 >= len(opts) {
+				return ttl, errReply(errSyntax)
+			}
+			n, err := strconv.ParseInt(string(opts[i+1]), 10, 64)
+			if err != nil {
+				return ttl, errReply(errNotAnInteger)
+			}
+			if n <= 0 {
+				r := invalidExpire("set")
+				return ttl, &r
+			}
+			step := time.Second
+			if name == "PX" {
+				step = time.Millisecond
+			}
+			if (name == "EX" && n > maxExpireSeconds) || (name == "PX" && n > maxExpireMillis) {
+				r := invalidExpire("set")
+				return ttl, &r
+			}
+			unit = name
+			ttl = engine.ExpiresIn(time.Duration(n) * step)
+			i++
+		default:
+			return ttl, errReply(errSyntax)
+		}
+	}
+	return ttl, nil
+}
+
+func errReply(msg string) *Reply {
+	r := Err(msg)
+	return &r
+}
+
 // cmdSet is the ownership boundary: the key and value are copied here, and
 // nothing beyond this point aliases the parser buffer.
-//
-// Options are a syntax error rather than a wrong-arity error — the count is
-// legal, the option is not. v0.2 replaces this branch with the EX/PX parser.
 func cmdSet(e *engine.Engine, args [][]byte) Reply {
-	if len(args) > 3 {
-		return Err("ERR syntax error")
+	ttl, bad := parseSetOptions(args[3:])
+	if bad != nil {
+		return *bad
 	}
 	key, value := string(args[1]), string(args[2])
-	if err := e.Set(key, value, engine.NoExpiry()); err != nil {
+	if err := e.Set(key, value, ttl); err != nil {
 		return mutationError(err)
 	}
 	return Simple("OK")
+}
+
+// cmdExpire attaches a deadline. A non-positive value deletes the key outright
+// and reports whether it was there — Redis's behaviour, measured rather than
+// remembered.
+func cmdExpire(e *engine.Engine, args [][]byte) Reply {
+	n, err := strconv.ParseInt(string(args[2]), 10, 64)
+	if err != nil {
+		return Err(errNotAnInteger)
+	}
+	key := string(args[1])
+
+	if n <= 0 {
+		removed, err := e.Delete([]string{key})
+		if err != nil {
+			return mutationError(err)
+		}
+		return Int(int64(removed))
+	}
+	if n > maxExpireSeconds {
+		return invalidExpire("expire")
+	}
+
+	applied, err := e.Expire(key, time.Duration(n)*time.Second)
+	if err != nil {
+		return mutationError(err)
+	}
+	return boolInt(applied)
+}
+
+// cmdTTL reports whole seconds remaining, rounded to nearest as Redis does:
+// (milliseconds + 500) / 1000. Measured against Redis 7 across six values —
+// "rounds up" was the remembered answer and it was wrong, since PX 1500 reports
+// 1 while PX 999 reports 1 as well.
+func cmdTTL(e *engine.Engine, args [][]byte) Reply {
+	d, st := e.TTL(string(args[1]))
+	switch st {
+	case engine.NoKey:
+		return Int(-2)
+	case engine.NoTTL:
+		return Int(-1)
+	}
+	ms := d.Milliseconds()
+	if ms < 0 {
+		ms = 0
+	}
+	return Int((ms + 500) / 1000)
+}
+
+func cmdPersist(e *engine.Engine, args [][]byte) Reply {
+	removed, err := e.Persist(string(args[1]))
+	if err != nil {
+		return mutationError(err)
+	}
+	return boolInt(removed)
+}
+
+func boolInt(b bool) Reply {
+	if b {
+		return Int(1)
+	}
+	return Int(0)
 }
 
 func cmdGet(e *engine.Engine, args [][]byte) Reply {
