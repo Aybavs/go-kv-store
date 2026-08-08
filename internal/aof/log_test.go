@@ -355,34 +355,87 @@ func TestWaitersWakeOnFailure(t *testing.T) {
 	}
 }
 
-// TestGroupCommit: under Always, writers waiting on the same Sync share one
-// syscall by construction rather than through a separate mechanism.
+// blockingWriteFile holds the first Write open until released, so records can
+// be made to accumulate in the buffer while the writer is busy.
+type blockingWriteFile struct {
+	mu      sync.Mutex
+	written []byte
+	syncs   int
+	once    sync.Once
+	release chan struct{}
+}
+
+func (b *blockingWriteFile) Write(p []byte) (int, error) {
+	b.once.Do(func() { <-b.release })
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.written = append(b.written, p...)
+	return len(p), nil
+}
+
+func (b *blockingWriteFile) Sync() error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.syncs++
+	return nil
+}
+
+func (b *blockingWriteFile) Close() error { return nil }
+
+func (b *blockingWriteFile) syncCount() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.syncs
+}
+
+// TestGroupCommit pins what spec §6.6 actually claims: group commit is not a
+// separate mechanism, because a flush takes the whole pending buffer and syncs
+// it once. Everything waiting in that buffer shares the syscall by
+// construction.
+//
+// The first version of this test appended from twenty goroutines and asserted
+// that fewer than twenty syncs resulted. That is a scheduling outcome, not a
+// construction: it passed locally and failed on both CI runners at 20 syncs for
+// 20 writers, because each writer got picked up on its own before the next
+// arrived. Batching is a property of what is in the buffer when a flush runs,
+// so the buffer is filled deliberately here rather than raced for.
 func TestGroupCommit(t *testing.T) {
-	f := &fakeFile{}
+	f := &blockingWriteFile{release: make(chan struct{})}
 	l, _ := openTestLog(t, f, Always)
 
-	const writers = 20
-	var wg sync.WaitGroup
-	for i := 0; i < writers; i++ {
-		wg.Add(1)
-		go func(i int) {
-			defer wg.Done()
-			seq, err := l.Append(DeriveSet("k", "v", time.Time{}, false))
-			if err != nil {
-				t.Errorf("Append: %v", err)
-				return
-			}
-			if err := l.Await(seq, Always); err != nil {
-				t.Errorf("Await: %v", err)
-			}
-		}(i)
+	// The first append occupies the writer, which now blocks inside Write.
+	first, err := l.Append(DeriveSet("k0", "v", time.Time{}, false))
+	if err != nil {
+		t.Fatalf("Append: %v", err)
 	}
-	wg.Wait()
 
-	if got := f.syncCount(); got >= writers {
-		t.Fatalf("%d writers caused %d syncs; batching is not happening at all", writers, got)
+	// Everything appended while it is blocked accumulates in one buffer.
+	const rest = 19
+	var last uint64
+	for i := 1; i <= rest; i++ {
+		last, err = l.Append(DeriveSet("k", "v", time.Time{}, false))
+		if err != nil {
+			t.Fatalf("Append %d: %v", i, err)
+		}
 	}
-	t.Logf("%d writers shared %d syncs", writers, f.syncCount())
+	if appended, _, _ := l.Markers(); appended != uint64(rest)+1 {
+		t.Fatalf("appended = %d, want %d", appended, rest+1)
+	}
+
+	close(f.release)
+
+	if err := awaitOrFail(t, l, last, Always); err != nil {
+		t.Fatalf("Await: %v", err)
+	}
+	_ = first
+
+	// One sync for the batch that was in flight, one for everything that piled
+	// up behind it. The exact bound is what makes this a statement about the
+	// construction rather than about the scheduler.
+	if got := f.syncCount(); got > 2 {
+		t.Fatalf("%d records took %d syncs, want at most 2", rest+1, got)
+	}
+	t.Logf("%d records shared %d syncs", rest+1, f.syncCount())
 }
 
 func TestCloseFlushesAndSyncs(t *testing.T) {
