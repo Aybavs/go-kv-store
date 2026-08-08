@@ -505,3 +505,57 @@ func FuzzReadCommand(f *testing.F) {
 		}
 	})
 }
+
+// TestIncompleteFrameIsDistinguishable pins the difference between a frame that
+// ran out and one that was malformed. A connection treats both the same way, so
+// the wire protocol has no use for it — but a reader recovering a file must
+// truncate the first and refuse to start on the second, and matching on the
+// message text would break the moment someone rewords it.
+func TestIncompleteFrameIsDistinguishable(t *testing.T) {
+	complete := "*3\r\n$3\r\nSET\r\n$3\r\nkey\r\n$5\r\nvalue\r\n"
+
+	t.Run("every truncation of a valid frame is incomplete", func(t *testing.T) {
+		for cut := 1; cut < len(complete); cut++ {
+			r := NewReader(strings.NewReader(complete[:cut]), DefaultLimits())
+			_, err := r.ReadCommand()
+			if err == nil {
+				t.Fatalf("cut at %d decoded a whole frame", cut)
+			}
+			if !errors.Is(err, ErrIncompleteFrame) {
+				t.Fatalf("cut at %d: %v is not reported as an incomplete frame", cut, err)
+			}
+		}
+	})
+
+	t.Run("malformed frames are not incomplete", func(t *testing.T) {
+		for _, bad := range []string{
+			"%3\r\n",
+			"*0\r\n",
+			"*-1\r\n",
+			"*3\r\n#3\r\nSET\r\n",
+			"*3\r\n$x\r\nSET\r\n",
+			"*abc\r\n",
+		} {
+			r := NewReader(strings.NewReader(bad), DefaultLimits())
+			_, err := r.ReadCommand()
+			var pe *ProtocolError
+			if !errors.As(err, &pe) {
+				t.Fatalf("%q: got %v, want a protocol error", bad, err)
+			}
+			if errors.Is(err, ErrIncompleteFrame) {
+				t.Fatalf("%q was reported as merely incomplete; recovery would truncate a corrupt file", bad)
+			}
+		}
+	})
+
+	t.Run("a clean end between frames is neither", func(t *testing.T) {
+		r := NewReader(strings.NewReader(""), DefaultLimits())
+		_, err := r.ReadCommand()
+		if !errors.Is(err, io.EOF) {
+			t.Fatalf("got %v, want io.EOF", err)
+		}
+		if errors.Is(err, ErrIncompleteFrame) {
+			t.Fatal("a clean EOF must not look like a torn frame")
+		}
+	})
+}

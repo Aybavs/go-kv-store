@@ -38,11 +38,31 @@ const maxRetainedBuffer = 1 << 20 // 1 MiB
 
 // ProtocolError means the stream cannot be resynchronised. The caller must
 // close the connection; there is no reliable point to resume parsing from.
-type ProtocolError struct{ Msg string }
+type ProtocolError struct {
+	Msg string
+	// incomplete distinguishes a frame that ran out of bytes from one that was
+	// malformed. Both break a connection identically, so the wire protocol has
+	// no use for the difference — but a reader recovering a file does: a frame
+	// that simply ended is the expected result of a crash, while a malformed
+	// one means the file cannot be trusted. Exposed through ErrIncompleteFrame
+	// rather than by matching on Msg, which would break the moment someone
+	// rewords it.
+	incomplete bool
+}
 
 func (e *ProtocolError) Error() string { return "protocol error: " + e.Msg }
 
+// ErrIncompleteFrame reports that a frame ended part-way through, as opposed to
+// being structurally wrong. Test with errors.Is.
+var ErrIncompleteFrame = errors.New("incomplete frame")
+
+func (e *ProtocolError) Is(target error) bool {
+	return target == ErrIncompleteFrame && e.incomplete
+}
+
 func protoErr(msg string) error { return &ProtocolError{Msg: msg} }
+
+func incompleteErr(msg string) error { return &ProtocolError{Msg: msg, incomplete: true} }
 
 // Reader decodes RESP2 request frames from a stream.
 type Reader struct {
@@ -162,7 +182,7 @@ func (r *Reader) readBulk() error {
 // legal between frames, never inside one.
 func bulkReadErr(err error) error {
 	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
-		return protoErr("unexpected end of stream inside frame")
+		return incompleteErr("unexpected end of stream inside frame")
 	}
 	return err
 }
@@ -179,7 +199,7 @@ func (r *Reader) readLine() ([]byte, error) {
 		// Bytes present here mean the stream ended part-way through a header
 		// line — a truncated frame, not a clean disconnect between frames.
 		if len(line) > 0 && (errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF)) {
-			return nil, protoErr("unexpected end of stream inside frame")
+			return nil, incompleteErr("unexpected end of stream inside frame")
 		}
 		return nil, err
 	}
