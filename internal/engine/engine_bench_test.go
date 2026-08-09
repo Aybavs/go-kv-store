@@ -201,3 +201,49 @@ func BenchmarkEngineSetLoggedToDiskParallel(b *testing.B) {
 		}
 	})
 }
+
+// BenchmarkEngineMGet measures the multi-key read against four present keys.
+// The keys are built outside the loop for the reason benchKeys documents.
+func BenchmarkEngineMGet(b *testing.B) {
+	e := benchEngine(b)
+	keys := benchKeys(b, e, 4)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		e.MGet(keys)
+	}
+}
+
+// BenchmarkEngineIncr is the first read-modify-write path in the project: it
+// reads the value, parses it, formats the result and writes it back, all under
+// one lock acquisition. Compare against BenchmarkEngineSet, which does the same
+// write with none of the read side.
+func BenchmarkEngineIncr(b *testing.B) {
+	e := benchEngine(b)
+	if err := e.Set("counter", "0", NoExpiry()); err != nil {
+		b.Fatal(err)
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, err := e.IncrBy("counter", 1); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+// BenchmarkEngineIncrWithTTL is the same path with a deadline to carry, which
+// adds the expires-map lookup that produces the record's PXAT.
+func BenchmarkEngineIncrWithTTL(b *testing.B) {
+	e := benchEngine(b)
+	if err := e.Set("counter", "0", ExpiresIn(time.Hour)); err != nil {
+		b.Fatal(err)
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, err := e.IncrBy("counter", 1); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
