@@ -95,6 +95,86 @@ lock. Ten nanoseconds on a path that already costs 108 ns to decode its own
 command is not worth that trade, and if end-to-end work in v0.5 ever says
 otherwise, it will say so with a number.
 
+## End to end, and the answer to the sharding question
+
+The micro-benchmarks below measure operations in isolation. This section
+measures the server, with a client, over a socket — which is what decides
+whether any of them matter.
+
+`redis-benchmark` works against this server unmodified, which is one of the
+things ADR-0002 chose the RESP2 subset for. Both servers run natively on the
+same machine, one at a time, with the same client and parameters.
+
+| 50 connections | SET rps | GET rps | p50 |
+|---|---|---|---|
+| Redis 8.10 | 117 716 | 115 407 | 0.215 ms |
+| go-kv-store | 99 010 | 91 785 | 0.263 / 0.295 ms |
+| go-kv-store, `--appendonly --appendfsync everysec` | 83 577 | 92 807 | 0.335 / 0.279 ms |
+
+| 1 connection | GET rps | p50 |
+|---|---|---|
+| Redis 8.10 | 34 722 | 0.023 ms |
+| go-kv-store | 33 613 | 0.023 ms |
+
+At one connection the two are within 3% of each other: both are bound by the
+round trip, and our per-request work is not the difference. The gap appears only
+under concurrency, where we reach roughly 80–84% of Redis.
+
+Persistence costs about 16% of write throughput under `everysec` and nothing at
+all on reads, which is what it should do — reads never touch the log.
+
+### Throughput does not change with core count
+
+| GOMAXPROCS | GET rps |
+|---|---|
+| 1 | 121 704 |
+| 2 | 124 095 |
+| 4 | 115 942 |
+| 8 | 100 587 |
+| 10 | 114 833 |
+
+Flat. That single table settles the sharding question on its own: the engine's
+read path costs 4× more per operation at ten cores than at one, so if the lock
+were anywhere near the limit, end-to-end throughput at one core would be
+visibly higher than at ten. It is not.
+
+### The profile says the same thing more bluntly
+
+300 000 GETs over 50 connections, CPU profile of the server:
+
+```
+      flat  flat%   cum%
+     3.52s 53.50% 53.50%  syscall.rawsyscalln
+     1.24s 18.84% 72.34%  runtime.pthread_cond_wait
+     1.09s 16.57% 88.91%  runtime.kevent
+     0.39s  5.93% 94.83%  runtime.pthread_cond_signal
+     0.30s  4.56% 99.39%  runtime.usleep
+
+                  28.57%  resp.(*Reader).ReadCommand   → bufio fill → read(2)
+                  24.77%  resp.(*Writer).Flush         → write(2)
+```
+
+**`engine`, `store` and the mutex do not appear at all** — not in the top
+fifteen, and below the 0.03s threshold at which nodes were dropped. Around 99%
+of CPU is syscalls and scheduler, split roughly evenly between the read and the
+write that each command costs.
+
+### What this means for v0.5
+
+Sharding is **not** the optimisation to make. ADR-0001 reserved it for the case
+where measurement justified it; measurement says it would address something
+invisible in the profile. That question is now closed with data rather than left
+open with a worry.
+
+The bottleneck is one `read` and one `write` syscall per command. That is also
+why Redis is ahead under concurrency and level with us at one connection: its
+single-threaded event loop does work for many connections per wakeup, while a
+goroutine per connection pays its own syscalls. Reducing syscalls per request is
+the direction — and `docs/architecture.md` already records why the obvious form
+of it is wrong, since `bufio.Reader.Buffered()` cannot tell you whether a
+complete next command is pending and deferring a flush on that signal
+deadlocks. A correct mechanism would need to be something else.
+
 ## Reads do not scale, and that is the sharding question
 
 `BenchmarkEngineParallelReads` is the number ADR-0001 says a sharding decision
