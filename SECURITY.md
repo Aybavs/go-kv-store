@@ -25,10 +25,17 @@ so an oversized request is refused rather than buffered.
 
 Two things it does not do, both measured on an Apple M4:
 
-- **Peak memory is about three times the configured value**, not equal to it.
-  Rejecting a request at the 128 MiB default peaked at 417 MB resident, because
-  the decode buffer grows by doubling and the previous array is still live while
-  it is copied.
+- **Peak memory is several times the configured value**, not equal to it.
+  Filling a 128 MiB command limit peaks at about 519 MB resident (median of five
+  runs, Apple M4). The decode buffer grows by doubling, so during a grow both
+  arrays are live, and every array it has outgrown stays resident until the
+  collector returns it.
+
+  Until v0.5.1 the final growth also overshot the limit itself: a payload the
+  size of the whole limit filled the buffer, and the two bytes of CRLF after it
+  asked for an array twice the limit. The same measurement was **648 MB** then.
+  The new array is now capped at the limit, which `internal/resp` pins with a
+  test rather than leaving to the allocator.
 - **It bounds one connection, not the server.** With `-max-clients` at its
   default of 1024, the worst case is that figure multiplied by the client limit.
   Lower both flags together if the server is reachable by untrusted clients.
