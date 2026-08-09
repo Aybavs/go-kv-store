@@ -1,6 +1,7 @@
 package store
 
 import (
+	"slices"
 	"testing"
 	"time"
 )
@@ -220,6 +221,34 @@ func TestLenIgnoresExpiredKeys(t *testing.T) {
 	}
 	if got := s.Len(at(2 * time.Hour)); got != 1 {
 		t.Fatalf("Len after both deadlines = %d, want 1", got)
+	}
+}
+
+func TestLiveKeysExcludesExpiredWithoutReclaiming(t *testing.T) {
+	s := New()
+	setNoTTL(s, "plain", "v")
+	setNoTTL(s, "binary\x00\xff", "v")
+	setTTL(s, "expired", "v", at(time.Second))
+
+	got := s.LiveKeys(at(time.Second))
+	slices.Sort(got)
+	want := []string{"binary\x00\xff", "plain"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("LiveKeys = %q, want %q", got, want)
+	}
+	if s.PhysicalLen() != 3 {
+		t.Fatalf("LiveKeys reclaimed data: PhysicalLen = %d, want 3", s.PhysicalLen())
+	}
+}
+
+func TestLiveKeysUsesCallerInstant(t *testing.T) {
+	s := New()
+	setTTL(s, "boundary", "v", at(time.Second))
+	if got := s.LiveKeys(at(time.Second - time.Nanosecond)); len(got) != 1 {
+		t.Fatalf("before deadline: LiveKeys = %q", got)
+	}
+	if got := s.LiveKeys(at(time.Second)); len(got) != 0 {
+		t.Fatalf("at deadline: LiveKeys = %q, want empty", got)
 	}
 }
 

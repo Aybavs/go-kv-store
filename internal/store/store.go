@@ -144,6 +144,18 @@ func (s *Store) Len(now time.Time) int {
 	return n
 }
 
+// LiveKeys returns a new slice containing every key logically live at now.
+// It does not sort, read the clock, lock, or reclaim expired entries.
+func (s *Store) LiveKeys(now time.Time) []string {
+	keys := make([]string, 0, len(s.data))
+	for key := range s.data {
+		if !s.expired(key, now) {
+			keys = append(keys, key)
+		}
+	}
+	return keys
+}
+
 // ReclaimExpired physically removes up to limit expired keys, reporting how many
 // it removed and examined. Interval and limit are the engine's decision.
 //
