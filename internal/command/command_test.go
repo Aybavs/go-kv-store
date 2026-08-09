@@ -519,3 +519,60 @@ func TestExpirationCommandArity(t *testing.T) {
 		}
 	}
 }
+
+// TestMGet pins the array shape. A missing key is a null bulk in place, not a
+// gap: a client matches answers to keys by position.
+func TestMGet(t *testing.T) {
+	r, _ := newTestRegistry(t)
+	r.Dispatch(args("SET", "a", "1"))
+	r.Dispatch(args("SET", "empty", ""))
+
+	got := r.Dispatch(args("MGET", "a", "empty", "missing", "a"))
+	if got.Kind != ReplyArray {
+		t.Fatalf("MGET reply kind = %v, want ReplyArray", got.Kind)
+	}
+	want := []Reply{Bulk("1"), Bulk(""), NullBulk(), Bulk("1")}
+	if len(got.Array) != len(want) {
+		t.Fatalf("MGET returned %d elements, want %d", len(got.Array), len(want))
+	}
+	for i := range want {
+		if !sameReply(got.Array[i], want[i]) {
+			t.Errorf("element %d = %+v, want %+v", i, got.Array[i], want[i])
+		}
+	}
+}
+
+// Reply holds a slice, so it is not comparable with ==. Array elements are
+// scalars in every reply a command produces today; nesting would need more.
+func sameReply(a, b Reply) bool {
+	return a.Kind == b.Kind && a.Str == b.Str && a.Int == b.Int && len(a.Array) == len(b.Array)
+}
+
+func TestMGetSingleKey(t *testing.T) {
+	r, _ := newTestRegistry(t)
+	r.Dispatch(args("SET", "a", "1"))
+
+	got := r.Dispatch(args("MGET", "a"))
+	if got.Kind != ReplyArray || len(got.Array) != 1 || !sameReply(got.Array[0], Bulk("1")) {
+		t.Fatalf("got %+v, want a one-element array holding 1", got)
+	}
+}
+
+func TestMGetWrongArity(t *testing.T) {
+	r, _ := newTestRegistry(t)
+	got := r.Dispatch(args("MGET"))
+	if got.Kind != ReplyError || got.Str != "ERR wrong number of arguments for 'mget' command" {
+		t.Fatalf("got %+v, want a wrong-arity error", got)
+	}
+}
+
+func TestMGetBinaryKeys(t *testing.T) {
+	r, _ := newTestRegistry(t)
+	key := "k\x00\r\n"
+	r.Dispatch(args("SET", key, "v"))
+
+	got := r.Dispatch(args("MGET", key, "k"))
+	if len(got.Array) != 2 || !sameReply(got.Array[0], Bulk("v")) || got.Array[1].Kind != ReplyNullBulk {
+		t.Fatalf("got %+v; a binary key must be distinct from its truncation", got)
+	}
+}

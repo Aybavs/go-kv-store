@@ -326,3 +326,41 @@ func TestRunSurfacesFatalWhileServing(t *testing.T) {
 		t.Fatal("Run did not return after a fatal condition was reported")
 	}
 }
+
+// TestServerMGetArrayFraming is the first test of writeReply's array branch.
+// That branch has existed since v0.1 with no command able to reach it, so its
+// framing has never been checked against the wire until MGET arrived.
+//
+// The bytes are asserted whole rather than through readReply, which only knows
+// how to read one scalar reply: an array that framed its elements wrongly would
+// still yield the right first line.
+func TestServerMGetArrayFraming(t *testing.T) {
+	addr, _ := startServer(t, nil)
+	c := dial(t, addr)
+
+	c.send(t, "SET", "a", "1")
+	if got := c.readReply(t); got != "+OK" {
+		t.Fatalf("SET a got %q", got)
+	}
+	c.send(t, "SET", "empty", "")
+	if got := c.readReply(t); got != "+OK" {
+		t.Fatalf("SET empty got %q", got)
+	}
+
+	c.send(t, "MGET", "a", "empty", "missing")
+	want := "*3\r\n$1\r\n1\r\n$0\r\n\r\n$-1\r\n"
+	got := make([]byte, len(want))
+	if _, err := io.ReadFull(c.br, got); err != nil {
+		t.Fatalf("read array: %v", err)
+	}
+	if string(got) != want {
+		t.Fatalf("MGET framing = %q, want %q", got, want)
+	}
+
+	// The stream must be back at a frame boundary: a mis-framed array leaves
+	// stray bytes that the next reply would be read out of.
+	c.send(t, "PING")
+	if got := c.readReply(t); got != "+PONG" {
+		t.Fatalf("PING after MGET got %q; the array left the stream misaligned", got)
+	}
+}

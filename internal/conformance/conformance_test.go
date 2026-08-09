@@ -210,9 +210,23 @@ var scenarios = map[string][]step{
 	"exists duplicates":   {cmd("SET", "a", "1"), cmd("EXISTS", "a", "a", "missing")},
 	"exists missing":      {cmd("EXISTS", "nope")},
 	"exists empty value":  {cmd("SET", "a", ""), cmd("EXISTS", "a")},
-	"unknown command":     {cmd("TOTALLYBOGUS")},
-	"unknown lowercase":   {cmd("totallybogus")},
-	"set wrong arity":     {cmd("SET", "only-key")},
+	// MGET is the only command that replies with an array, so these are also
+	// the only scenarios that compare array framing against Redis.
+	"mget one":          {cmd("SET", "a", "1"), cmd("MGET", "a")},
+	"mget many":         {cmd("SET", "a", "1"), cmd("SET", "b", "2"), cmd("MGET", "a", "b")},
+	"mget with a miss":  {cmd("SET", "a", "1"), cmd("MGET", "a", "nope", "b")},
+	"mget duplicates":   {cmd("SET", "a", "1"), cmd("MGET", "a", "a")},
+	"mget all missing":  {cmd("MGET", "x", "y")},
+	"mget empty value":  {cmd("SET", "a", ""), cmd("MGET", "a", "nope")},
+	"mget binary key":   {cmd("SET", "k\x00\r\n", "v"), cmd("MGET", "k\x00\r\n", "k")},
+	"mget binary value": {cmd("SET", "a", "x\x00y\r\nz"), cmd("MGET", "a")},
+	"mget after del":    {cmd("SET", "a", "1"), cmd("DEL", "a"), cmd("MGET", "a")},
+	"mget key with ttl": {cmd("SET", "a", "1", "EX", "100"), cmd("MGET", "a")},
+	"mget long value":   {cmd("SET", "a", makeString(70000)), cmd("MGET", "a")},
+	"mget wrong arity":  {cmd("MGET")},
+	"unknown command":   {cmd("TOTALLYBOGUS")},
+	"unknown lowercase": {cmd("totallybogus")},
+	"set wrong arity":   {cmd("SET", "only-key")},
 	// EX and PX are implemented as of v0.2, so the interesting cases moved to
 	// the expiration block below. NX and KEEPTTL still diverge by design: Redis
 	// executes them and we answer with the same syntax error it gives an option

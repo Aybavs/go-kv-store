@@ -36,6 +36,7 @@ func New(e *engine.Engine) *Registry {
 	// options, and rejecting one is cmdSet's job, not the arity check's.
 	r.cmds["SET"] = spec{minArgs: 3, maxArgs: -1, run: cmdSet}
 	r.cmds["GET"] = spec{minArgs: 2, maxArgs: 2, run: cmdGet}
+	r.cmds["MGET"] = spec{minArgs: 2, maxArgs: -1, run: cmdMGet}
 	r.cmds["DEL"] = spec{minArgs: 2, maxArgs: -1, run: cmdDel}
 	r.cmds["EXISTS"] = spec{minArgs: 2, maxArgs: -1, run: cmdExists}
 	r.cmds["EXPIRE"] = spec{minArgs: 3, maxArgs: 3, run: cmdExpire}
@@ -249,6 +250,22 @@ func cmdGet(e *engine.Engine, args [][]byte) Reply {
 		return NullBulk()
 	}
 	return Bulk(v)
+}
+
+// cmdMGet answers one element per requested key, in request order, with a null
+// bulk string where the key is absent. A missing key is a hole in the array,
+// never a shorter array — position is how the client matches answers to keys.
+func cmdMGet(e *engine.Engine, args [][]byte) Reply {
+	results := e.MGet(ownedKeys(args))
+	items := make([]Reply, 0, len(results))
+	for _, r := range results {
+		if !r.Found {
+			items = append(items, NullBulk())
+			continue
+		}
+		items = append(items, Bulk(r.Value))
+	}
+	return Array(items)
 }
 
 // ownedKeys copies the borrowed key arguments into owned strings.
