@@ -36,30 +36,35 @@ func fillDefaultScanSessionLimit(e *engine.Engine) ([]uint64, error) {
 	return tokens, nil
 }
 
-func TestShutdownClearsSessionsCreatedByHandlersBeforeTheyStop(t *testing.T) {
+func TestShutdownClearsSessionsCreatedAfterReturnWhenLastHandlerExits(t *testing.T) {
+	fatalCause := errors.New("fatal scan cleanup test")
 	for _, tc := range []struct {
-		name     string
-		shutdown func(*Server, *Supervisor) error
-		wantErr  bool
+		name      string
+		maxReturn time.Duration
+		shutdown  func(*Server, *Supervisor) error
+		wantErr   error
 	}{
 		{
-			name: "graceful",
+			name:      "graceful",
+			maxReturn: 3 * time.Second,
 			shutdown: func(s *Server, _ *Supervisor) error {
 				return s.gracefulShutdown()
 			},
+			wantErr: ErrShutdownTimeout,
 		},
 		{
-			name: "fatal",
+			name:      "fatal",
+			maxReturn: 300 * time.Millisecond,
 			shutdown: func(s *Server, sup *Supervisor) error {
-				cause := errors.New("fatal scan cleanup test")
-				sup.Fatal(cause)
-				return s.fatalShutdown(cause)
+				sup.Fatal(fatalCause)
+				return s.fatalShutdown(fatalCause)
 			},
-			wantErr: true,
+			wantErr: fatalCause,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			srv, sup, _ := newBoundServer(t)
+			srv.cfg.ShutdownTimeout = 10 * time.Millisecond
 			for i := 0; i < 17; i++ {
 				if err := srv.eng.Set(fmt.Sprintf("scan:%02d", i), "v", engine.NoExpiry()); err != nil {
 					t.Fatalf("seed scan key %d: %v", i, err)
@@ -73,7 +78,7 @@ func TestShutdownClearsSessionsCreatedByHandlersBeforeTheyStop(t *testing.T) {
 			}, 1)
 			client, conn := net.Pipe()
 			defer client.Close()
-			register(srv, conn, func() {
+			handlerFinished := register(srv, conn, func() {
 				<-srv.draining
 				close(handlerStarted)
 				<-allowSessionCreation
@@ -87,27 +92,31 @@ func TestShutdownClearsSessionsCreatedByHandlersBeforeTheyStop(t *testing.T) {
 			shutdownDone := make(chan error, 1)
 			go func() { shutdownDone <- tc.shutdown(srv, sup) }()
 			<-handlerStarted
-			returnedBeforeHandler := false
 			var shutdownErr error
 			select {
 			case shutdownErr = <-shutdownDone:
-				returnedBeforeHandler = true
-			default:
+			case <-time.After(tc.maxReturn):
+				close(allowSessionCreation)
+				created := <-retained
+				<-handlerFinished
+				<-shutdownDone
+				if created.err != nil {
+					t.Fatalf("handler session setup after slow shutdown: %v", created.err)
+				}
+				t.Fatalf("shutdown did not return within %v while a handler remained active", tc.maxReturn)
 			}
+			if !errors.Is(shutdownErr, tc.wantErr) {
+				t.Errorf("shutdown error = %v, want %v", shutdownErr, tc.wantErr)
+			}
+
+			// The shutdown function has returned and its immediate deferred clear
+			// has already run. This handler now creates sessions deliberately late.
 			close(allowSessionCreation)
 			created := <-retained
 			if created.err != nil {
 				t.Fatalf("handler session setup: %v", created.err)
 			}
-			if !returnedBeforeHandler {
-				shutdownErr = <-shutdownDone
-			}
-			if returnedBeforeHandler {
-				t.Error("shutdown returned before the registered handler stopped")
-			}
-			if tc.wantErr != (shutdownErr != nil) {
-				t.Errorf("shutdown error = %v, wantErr %v", shutdownErr, tc.wantErr)
-			}
+			<-handlerFinished
 
 			for _, cursor := range created.tokens {
 				if _, err := srv.eng.Scan(engine.ScanRequest{Cursor: cursor, Count: 1}); !errors.Is(err, engine.ErrInvalidCursor) {
@@ -171,17 +180,21 @@ func (c *blockingConn) Close() error {
 // register attaches a fake handler to the server: a connection in the set and a
 // goroutine in the wait group, which is exactly what a real one contributes to
 // shutdown. body decides when that handler finishes.
-func register(s *Server, conn net.Conn, body func()) {
+func register(s *Server, conn net.Conn, body func()) <-chan struct{} {
 	s.mu.Lock()
 	s.conns[conn] = struct{}{}
 	s.nClient++
 	s.mu.Unlock()
 
+	finished := make(chan struct{})
 	s.wg.Add(1)
 	go func() {
+		defer close(finished)
 		defer s.wg.Done()
+		defer s.releaseConn(conn)
 		body()
 	}()
+	return finished
 }
 
 // Spec §10.2 (2): a command already executing when the signal arrives is

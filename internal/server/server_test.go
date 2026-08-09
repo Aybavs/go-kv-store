@@ -115,16 +115,46 @@ func (c *client) readReply(t *testing.T) string {
 
 func (c *client) readBulkReply(t *testing.T) string {
 	t.Helper()
-	frame := c.readReply(t)
-	parts := strings.SplitN(frame, "\r\n", 2)
-	if len(parts) != 2 || len(parts[0]) < 2 || parts[0][0] != '$' {
-		t.Fatalf("reply element = %q, want RESP2 bulk string", frame)
+	payload, err := c.readBulkReplyResult(t)
+	if err != nil {
+		t.Fatal(err)
 	}
-	length, err := strconv.Atoi(parts[0][1:])
-	if err != nil || length != len(parts[1]) {
-		t.Fatalf("bulk reply = %q, declared length %q does not match payload", frame, parts[0][1:])
+	return payload
+}
+
+func (c *client) readBulkReplyResult(t *testing.T) (string, error) {
+	t.Helper()
+	_ = c.conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+	header, err := c.br.ReadString('\n')
+	if err != nil {
+		return "", err
 	}
-	return parts[1]
+	if !strings.HasSuffix(header, "\r\n") {
+		return "", errors.New("bulk reply header does not end in CRLF")
+	}
+	header = strings.TrimSuffix(header, "\r\n")
+	if len(header) < 2 || header[0] != '$' {
+		return "", errors.New("reply element is not a RESP2 bulk string")
+	}
+	for i := 1; i < len(header); i++ {
+		if header[i] < '0' || header[i] > '9' {
+			return "", errors.New("bulk reply length is not an unsigned decimal")
+		}
+	}
+	length, err := strconv.ParseUint(header[1:], 10, 64)
+	maxInt := int(^uint(0) >> 1)
+	if err != nil || length > uint64(maxInt-2) {
+		return "", errors.New("bulk reply length is out of range")
+	}
+	payloadLength := int(length)
+	payload := make([]byte, payloadLength+2)
+	if _, err := io.ReadFull(c.br, payload); err != nil {
+		return "", err
+	}
+	if payload[payloadLength] != '\r' || payload[payloadLength+1] != '\n' {
+		return "", errors.New("bulk reply payload does not end in CRLF")
+	}
+	return string(payload[:payloadLength]), nil
 }
 
 func itoa(n int) string {
@@ -145,6 +175,35 @@ func atoi(s string) int {
 		n = n*10 + int(s[i]-'0')
 	}
 	return n
+}
+
+func TestReadBulkReplyRejectsMalformedTerminator(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		frame string
+	}{
+		{name: "header CRLF", frame: "$1\na\r\n"},
+		{name: "payload CRLF", frame: "$1\r\naXX"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			reader, writer := net.Pipe()
+			defer reader.Close()
+
+			wrote := make(chan error, 1)
+			go func() {
+				_, err := io.WriteString(writer, tc.frame)
+				_ = writer.Close()
+				wrote <- err
+			}()
+
+			c := &client{conn: reader, br: bufio.NewReader(reader)}
+			if payload, err := c.readBulkReplyResult(t); err == nil {
+				t.Errorf("malformed bulk terminator accepted with payload %q", payload)
+			}
+			_ = reader.Close()
+			<-wrote
+		})
+	}
 }
 
 func TestServerPing(t *testing.T) {

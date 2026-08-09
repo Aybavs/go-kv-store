@@ -153,12 +153,20 @@ func (s *Server) admit(conn net.Conn) bool {
 }
 
 func (s *Server) releaseConn(conn net.Conn) {
+	clearScanSessions := false
 	s.mu.Lock()
 	if _, ok := s.conns[conn]; ok {
 		delete(s.conns, conn)
 		s.nClient--
+		clearScanSessions = s.nClient == 0 && s.isDraining()
 	}
 	s.mu.Unlock()
+	// A handler can outlive bounded shutdown and create a session after the
+	// shutdown path's immediate clear. The last real handler closes that gap,
+	// without ever overlapping the server mutex and the session-manager lock.
+	if clearScanSessions {
+		s.eng.ClearScanSessions()
+	}
 	_ = conn.Close()
 }
 
@@ -214,7 +222,7 @@ func (s *Server) gracefulShutdown() error {
 		cause := s.sup.Cause()
 		s.log.Error("fatal condition reported during shutdown", "err", cause)
 		s.closeAllConns()
-		s.waitConnsStopped(2 * time.Second)
+		s.waitConns(2 * time.Second)
 		return cause
 	}
 
@@ -225,7 +233,7 @@ func (s *Server) gracefulShutdown() error {
 
 	s.log.Warn("shutdown: timeout, closing remaining connections")
 	s.closeAllConns()
-	s.waitConnsStopped(2 * time.Second)
+	s.waitConns(2 * time.Second)
 	return ErrShutdownTimeout
 }
 
@@ -244,7 +252,7 @@ func (s *Server) fatalShutdown(cause error) error {
 	s.eng.BeginDrain()
 	close(s.draining)
 	s.closeAllConns()
-	s.waitConnsStopped(2 * time.Second)
+	s.waitConns(2 * time.Second)
 	return cause
 }
 
@@ -270,23 +278,6 @@ func (s *Server) waitConns(d time.Duration) bool {
 		return true
 	case <-s.sup.Done():
 		return false
-	case <-time.After(d):
-		return false
-	}
-}
-
-// waitConnsStopped is used after every connection has been closed. A fatal
-// report must not make this wait return early: shutdown-owned resources can be
-// released only after handlers have stopped using them.
-func (s *Server) waitConnsStopped(d time.Duration) bool {
-	done := make(chan struct{})
-	go func() {
-		s.wg.Wait()
-		close(done)
-	}()
-	select {
-	case <-done:
-		return true
 	case <-time.After(d):
 		return false
 	}
