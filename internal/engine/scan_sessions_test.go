@@ -4,6 +4,7 @@ import (
 	"errors"
 	"math"
 	"slices"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -171,6 +172,81 @@ func TestScanSessionConcurrentSessionsRemainIsolated(t *testing.T) {
 	}
 	if got := m.stats(); got.active != 2 {
 		t.Fatalf("active sessions = %d, want 2", got.active)
+	}
+}
+
+func TestScanSessionConcurrentConsumptionIsAtomic(t *testing.T) {
+	now := time.Date(2026, 8, 9, 12, 0, 0, 0, time.UTC)
+	tokens := []uint64{141, 142, 143}
+	var tokenIndex atomic.Uint64
+	m := newScanSessionManager(
+		func() time.Time { return now },
+		func() (uint64, error) {
+			index := tokenIndex.Add(1) - 1
+			if index >= uint64(len(tokens)) {
+				return 0, errors.New("token sequence exhausted")
+			}
+			return tokens[index], nil
+		},
+		scanSessionLimits{ttl: time.Minute, maxSessions: 4, maxBytes: 1 << 20},
+	)
+
+	first, err := m.start([]string{"a", "b", "c"}, "*", 1, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	type nextResult struct {
+		page ScanResult
+		err  error
+	}
+	ready := make(chan struct{}, 2)
+	start := make(chan struct{})
+	results := make(chan nextResult, 2)
+	for range 2 {
+		go func() {
+			ready <- struct{}{}
+			<-start
+			page, err := m.next(first.Cursor, "", false, 1, now)
+			results <- nextResult{page: page, err: err}
+		}()
+	}
+	<-ready
+	<-ready
+	close(start)
+
+	var winner ScanResult
+	successes, invalid := 0, 0
+	for range 2 {
+		result := <-results
+		switch {
+		case result.err == nil:
+			successes++
+			winner = result.page
+			if winner.Cursor == 0 || winner.Cursor == first.Cursor || !slices.Equal(winner.Keys, []string{"b"}) {
+				t.Fatalf("successful concurrent next = %+v, want replacement cursor and [b]", winner)
+			}
+		case errors.Is(result.err, ErrInvalidCursor):
+			invalid++
+			if result.page.Cursor != 0 || len(result.page.Keys) != 0 {
+				t.Fatalf("invalid concurrent next returned page %+v", result.page)
+			}
+		default:
+			t.Fatalf("concurrent next returned unexpected error %v and page %+v", result.err, result.page)
+		}
+	}
+	if successes != 1 || invalid != 1 {
+		t.Fatalf("concurrent next outcomes = %d success, %d invalid; want one each", successes, invalid)
+	}
+
+	last, err := m.next(winner.Cursor, "", false, 99, now)
+	if err != nil {
+		t.Fatalf("winning replacement cursor: %v", err)
+	}
+	if last.Cursor != 0 || !slices.Equal(last.Keys, []string{"c"}) {
+		t.Fatalf("final page = %+v, want cursor 0 and [c]", last)
+	}
+	if got := m.stats(); got.active != 0 || got.retainedBytes != 0 {
+		t.Fatalf("stats after completion = %+v, want zero", got)
 	}
 }
 
