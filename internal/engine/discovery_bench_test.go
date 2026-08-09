@@ -7,6 +7,7 @@ import (
 	"slices"
 	"sort"
 	"strconv"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -236,6 +237,11 @@ func BenchmarkScanSessionCreation(b *testing.B) {
 	}
 }
 
+// Continuation and cleanup setup is intentionally outside the timer: those
+// rows isolate one continuation/cleanup operation. Task 13 must use documented
+// fixed iteration counts with three repetitions; adaptive calibration would
+// mix a variable number of excluded setup operations into otherwise comparable
+// rows.
 func BenchmarkScanSessionContinuation(b *testing.B) {
 	for _, size := range discoverySizes {
 		e := benchDiscoveryEngine(b, size)
@@ -429,6 +435,11 @@ type latencyStats struct {
 	p50, p95, p99 time.Duration
 }
 
+type discoveryLatencyMeasurement struct {
+	latencyStats
+	samples int
+}
+
 func summarizeLatencies(values []time.Duration) latencyStats {
 	sort.Slice(values, func(i, j int) bool { return values[i] < values[j] })
 	at := func(q float64) time.Duration {
@@ -437,22 +448,88 @@ func summarizeLatencies(values []time.Duration) latencyStats {
 	return latencyStats{p50: at(.50), p95: at(.95), p99: at(.99)}
 }
 
-func measureDiscoveryLatency(e *Engine, set bool) (latencyStats, error) {
-	const operations = 5_000
-	values := make([]time.Duration, operations)
-	for i := 0; i < operations; i++ {
+func benchDiscoveryLatencyKeys() []string {
+	keys := make([]string, 1_000)
+	for i := range keys {
+		keys[i] = "key:" + strconv.Itoa(i)
+	}
+	return keys
+}
+
+func TestBenchDiscoveryLatencyKeysArePrecomputed(t *testing.T) {
+	keys := benchDiscoveryLatencyKeys()
+	if len(keys) != 1_000 || keys[0] != "key:0" || keys[999] != "key:999" {
+		t.Fatalf("latency keys = len %d, endpoints %q/%q; want 1000 precomputed seeded keys",
+			len(keys), firstString(keys), lastString(keys))
+	}
+}
+
+func firstString(values []string) string {
+	if len(values) == 0 {
+		return ""
+	}
+	return values[0]
+}
+
+func lastString(values []string) string {
+	if len(values) == 0 {
+		return ""
+	}
+	return values[len(values)-1]
+}
+
+func measureDiscoveryLatencyFor(
+	e *Engine,
+	set bool,
+	keys []string,
+	duration time.Duration,
+	onStart func(),
+) (discoveryLatencyMeasurement, error) {
+	if len(keys) == 0 {
+		return discoveryLatencyMeasurement{}, errors.New("latency arm requires precomputed keys")
+	}
+	values := make([]time.Duration, 0, 1<<20)
+	started := time.Now()
+	if onStart != nil {
+		onStart()
+	}
+	deadline := started.Add(duration)
+	for time.Now().Before(deadline) {
+		key := keys[len(values)%len(keys)]
 		begin := time.Now()
-		key := "key:" + strconv.Itoa(i%1_000)
 		if set {
 			if err := e.Set(key, "v", NoExpiry()); err != nil {
-				return latencyStats{}, err
+				return discoveryLatencyMeasurement{}, err
 			}
 		} else {
 			e.Get(key)
 		}
-		values[i] = time.Since(begin)
+		values = append(values, time.Since(begin))
 	}
-	return summarizeLatencies(values), nil
+	if len(values) == 0 {
+		return discoveryLatencyMeasurement{}, errors.New("latency arm recorded no samples")
+	}
+	return discoveryLatencyMeasurement{
+		latencyStats: summarizeLatencies(values),
+		samples:      len(values),
+	}, nil
+}
+
+func TestBenchDiscoveryLatencyArmRunsForFixedDuration(t *testing.T) {
+	e := benchDiscoveryEngine(t, 23)
+	keys := benchDiscoveryLatencyKeys()
+	const duration = 50 * time.Millisecond
+	started := time.Now()
+	measurement, err := measureDiscoveryLatencyFor(e, false, keys, duration, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if elapsed := time.Since(started); elapsed < duration {
+		t.Fatalf("latency arm ran for %s, want at least %s", elapsed, duration)
+	}
+	if measurement.samples == 0 {
+		t.Fatal("latency arm recorded no samples")
+	}
 }
 
 func runBenchDiscoveryInitialCapture(e *Engine, count uint64) error {
@@ -489,37 +566,109 @@ func TestBenchDiscoveryLoadRepeatsInitialCapture(t *testing.T) {
 }
 
 type discoveryCaptureLoad struct {
-	stop chan struct{}
-	done chan struct{}
-	err  chan error
+	start     chan struct{}
+	stop      chan struct{}
+	done      chan struct{}
+	err       chan error
+	startOnce sync.Once
+	completed atomic.Int64
+}
+
+func TestBenchDiscoveryLoadWaitsAtCaptureStart(t *testing.T) {
+	e := benchDiscoveryEngine(t, 23)
+	liveKeys := e.scanLiveKeys
+	captureEntered := make(chan struct{})
+	releaseCapture := make(chan struct{})
+	var entered sync.Once
+	e.scanLiveKeys = func(now time.Time) []string {
+		entered.Do(func() { close(captureEntered) })
+		<-releaseCapture
+		return liveKeys(now)
+	}
+
+	type startResult struct {
+		load *discoveryCaptureLoad
+		err  error
+	}
+	returned := make(chan startResult, 1)
+	go func() {
+		load, err := startBenchDiscoveryCaptureLoad(e, 10)
+		returned <- startResult{load: load, err: err}
+	}()
+
+	select {
+	case result := <-returned:
+		if result.err != nil {
+			t.Fatalf("prepare capture load: %v", result.err)
+		}
+		if err := result.load.stopAndWait(); err != nil {
+			t.Fatalf("stop prepared capture load: %v", err)
+		}
+	case <-captureEntered:
+		close(releaseCapture)
+		result := <-returned
+		if result.err == nil {
+			if err := result.load.stopAndWait(); err != nil {
+				t.Errorf("stop capture load after failed invariant: %v", err)
+			}
+		}
+		t.Fatal("capture began before load preparation returned; foreground cannot start at capture onset")
+	}
+}
+
+func TestBenchDiscoveryLoadCountsCompletedCapturesAndStopsCleanly(t *testing.T) {
+	e := benchDiscoveryEngine(t, 23)
+	liveKeys := e.scanLiveKeys
+	captureStarted := make(chan struct{}, 3)
+	e.scanLiveKeys = func(now time.Time) []string {
+		select {
+		case captureStarted <- struct{}{}:
+		default:
+		}
+		return liveKeys(now)
+	}
+
+	load, err := startBenchDiscoveryCaptureLoad(e, 10)
+	if err != nil {
+		t.Fatalf("prepare capture load: %v", err)
+	}
+	load.begin()
+	for range 3 {
+		<-captureStarted
+	}
+	if err := load.stopAndWait(); err != nil {
+		t.Fatalf("stop capture load: %v", err)
+	}
+	if got := load.completed.Load(); got < 3 {
+		t.Fatalf("completed captures = %d, want at least 3", got)
+	}
+	requireBenchSessionStats(t, e, 0)
 }
 
 func startBenchDiscoveryCaptureLoad(e *Engine, count uint64) (*discoveryCaptureLoad, error) {
 	load := &discoveryCaptureLoad{
-		stop: make(chan struct{}),
-		done: make(chan struct{}),
-		err:  make(chan error, 1),
+		start: make(chan struct{}),
+		stop:  make(chan struct{}),
+		done:  make(chan struct{}),
+		err:   make(chan error, 1),
 	}
 	ready := make(chan struct{})
-	start := make(chan struct{})
-	first := make(chan error, 1)
 	go func() {
 		defer close(load.done)
 		defer e.ClearScanSessions()
 		close(ready)
-		<-start
-		firstCapture := true
+		select {
+		case <-load.start:
+		case <-load.stop:
+			return
+		}
 		for {
 			err := runBenchDiscoveryInitialCapture(e, count)
-			if firstCapture {
-				first <- err
-				firstCapture = false
-			} else if err != nil {
-				load.err <- err
-			}
 			if err != nil {
+				load.err <- err
 				return
 			}
+			load.completed.Add(1)
 			select {
 			case <-load.stop:
 				return
@@ -528,12 +677,11 @@ func startBenchDiscoveryCaptureLoad(e *Engine, count uint64) (*discoveryCaptureL
 		}
 	}()
 	<-ready
-	close(start)
-	if err := <-first; err != nil {
-		<-load.done
-		return nil, err
-	}
 	return load, nil
+}
+
+func (l *discoveryCaptureLoad) begin() {
+	l.startOnce.Do(func() { close(l.start) })
 }
 
 func (l *discoveryCaptureLoad) stopAndWait() error {
@@ -547,11 +695,49 @@ func (l *discoveryCaptureLoad) stopAndWait() error {
 	}
 }
 
+const (
+	benchDiscoveryContentionDuration = 150 * time.Millisecond
+	benchDiscoveryMinCaptures        = int64(3)
+)
+
+type discoveryContentionArm struct {
+	discoveryLatencyMeasurement
+	completedCaptures int64
+}
+
+func measureBenchDiscoveryContentionArm(
+	e *Engine,
+	count uint64,
+	set bool,
+	keys []string,
+	loaded bool,
+) (discoveryContentionArm, error) {
+	if !loaded {
+		measurement, err := measureDiscoveryLatencyFor(e, set, keys, benchDiscoveryContentionDuration, nil)
+		return discoveryContentionArm{discoveryLatencyMeasurement: measurement}, err
+	}
+
+	load, err := startBenchDiscoveryCaptureLoad(e, count)
+	if err != nil {
+		return discoveryContentionArm{}, err
+	}
+	measurement, operationErr := measureDiscoveryLatencyFor(e, set, keys, benchDiscoveryContentionDuration, load.begin)
+	loadErr := load.stopAndWait()
+	if operationErr != nil || loadErr != nil {
+		return discoveryContentionArm{}, errors.Join(operationErr, loadErr)
+	}
+	return discoveryContentionArm{
+		discoveryLatencyMeasurement: measurement,
+		completedCaptures:           load.completed.Load(),
+	}, nil
+}
+
 func TestBenchDiscoveryContention(t *testing.T) {
 	if os.Getenv("KV_ENUM_BENCH") != "1" {
 		t.Skip("set KV_ENUM_BENCH=1 to measure GET/SET latency during repeated initial snapshot capture")
 	}
 	e := benchDiscoveryEngine(t, 100_000)
+	keys := benchDiscoveryLatencyKeys()
 	for _, count := range discoveryCounts {
 		for _, operation := range []struct {
 			name string
@@ -561,30 +747,32 @@ func TestBenchDiscoveryContention(t *testing.T) {
 			{"SET", true},
 		} {
 			for repetition := 1; repetition <= 5; repetition++ {
-				requireBenchSessionStats(t, e, 0)
-				baseline, err := measureDiscoveryLatency(e, operation.set)
-				if err != nil {
-					t.Fatalf("rep=%d operation=%s COUNT=%d arm=baseline: %v", repetition, operation.name, count, err)
+				order := "baseline-first"
+				arms := []bool{false, true}
+				if repetition%2 == 0 {
+					order = "load-first"
+					arms = []bool{true, false}
 				}
-				requireBenchSessionStats(t, e, 0)
-				t.Logf("rep=%d operation=%s COUNT=%d arm=baseline background=none p50=%s p95=%s p99=%s",
-					repetition, operation.name, count, baseline.p50, baseline.p95, baseline.p99)
-
-				load, err := startBenchDiscoveryCaptureLoad(e, count)
-				if err != nil {
-					t.Fatalf("rep=%d operation=%s COUNT=%d start capture load: %v", repetition, operation.name, count, err)
+				for _, loaded := range arms {
+					requireBenchSessionStats(t, e, 0)
+					result, err := measureBenchDiscoveryContentionArm(e, count, operation.set, keys, loaded)
+					if err != nil {
+						t.Fatalf("rep=%d operation=%s COUNT=%d loaded=%v: %v", repetition, operation.name, count, loaded, err)
+					}
+					requireBenchSessionStats(t, e, 0)
+					if loaded {
+						if result.completedCaptures < benchDiscoveryMinCaptures {
+							t.Fatalf("rep=%d operation=%s COUNT=%d completed captures = %d, want at least %d",
+								repetition, operation.name, count, result.completedCaptures, benchDiscoveryMinCaptures)
+						}
+						t.Logf("rep=%d order=%s operation=%s COUNT=%d arm=load background=repeated-initial-capture samples=%d completed-captures=%d p50=%s p95=%s p99=%s",
+							repetition, order, operation.name, count, result.samples, result.completedCaptures,
+							result.p50, result.p95, result.p99)
+						continue
+					}
+					t.Logf("rep=%d order=%s operation=%s COUNT=%d arm=baseline background=none samples=%d completed-captures=0 p50=%s p95=%s p99=%s",
+						repetition, order, operation.name, count, result.samples, result.p50, result.p95, result.p99)
 				}
-				loaded, operationErr := measureDiscoveryLatency(e, operation.set)
-				loadErr := load.stopAndWait()
-				if operationErr != nil {
-					t.Fatalf("rep=%d operation=%s COUNT=%d arm=initial-capture: %v", repetition, operation.name, count, operationErr)
-				}
-				if loadErr != nil {
-					t.Fatalf("rep=%d operation=%s COUNT=%d background capture: %v", repetition, operation.name, count, loadErr)
-				}
-				requireBenchSessionStats(t, e, 0)
-				t.Logf("rep=%d operation=%s COUNT=%d arm=load background=repeated-initial-capture p50=%s p95=%s p99=%s",
-					repetition, operation.name, count, loaded.p50, loaded.p95, loaded.p99)
 			}
 		}
 	}
