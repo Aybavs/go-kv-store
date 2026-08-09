@@ -1,5 +1,9 @@
 # Wire Protocol
 
+This is the reference. For writing a client, [client-guide.md](client-guide.md)
+covers the same ground in the order you need it, and starts with the commands
+that do not exist.
+
 go-kv-store speaks a deliberately small, RESP2-compatible subset. `redis-cli`
 and RESP2 client libraries talk to it without modification. Anything not listed
 here is out of scope and is not part of the contract.

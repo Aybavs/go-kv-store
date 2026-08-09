@@ -132,7 +132,10 @@ With Docker:
 | `INCR key` / `DECR key` | the value after the change; any TTL is preserved |
 
 Full wire format, error classes and the deviations from Redis are in
-[docs/protocol.md](docs/protocol.md).
+[docs/protocol.md](docs/protocol.md). If you are writing a client or a user
+interface, start with [docs/client-guide.md](docs/client-guide.md) — it leads
+with what this server cannot do, because that decides more about an application
+than anything it can.
 
 ## Configuration
 

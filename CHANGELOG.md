@@ -6,6 +6,14 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `docs/client-guide.md`, for writing a client or a user interface against this
+  server. It leads with what the server cannot do — there is no key enumeration,
+  no change notification and no introspection — because that decides more about
+  an application than anything it can do. Every byte sequence in it was captured
+  from a running server, and every behavioural claim was checked against one
+
 ## [1.0.1] - 2026-08-09
 
 **No change to server behaviour.** Every production file is identical to v1.0.0
