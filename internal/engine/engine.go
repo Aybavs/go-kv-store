@@ -249,6 +249,32 @@ func (e *Engine) Get(key string) (string, bool) {
 	return e.store.Get(key, e.readNow())
 }
 
+// Optional is a value that may not be there. MGET has to distinguish "the key
+// holds an empty string" from "the key is absent", and a bare string cannot.
+type Optional struct {
+	Value string
+	Found bool
+}
+
+// MGet reads every key in one pass and returns the results in request order.
+// Duplicated keys are answered once per occurrence, as Redis does.
+//
+// It is a read: no admission gate, no log, and no upgrade to the write lock for
+// a key found expired. Physical deletion stays the worker's job.
+func (e *Engine) MGet(keys []string) []Optional {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	// One clock read for the whole call, so no key is judged against a later
+	// instant than the key before it in the same MGET.
+	now := e.readNow()
+	out := make([]Optional, 0, len(keys))
+	for _, k := range keys {
+		v, ok := e.store.Get(k, now)
+		out = append(out, Optional{Value: v, Found: ok})
+	}
+	return out
+}
+
 // Exists reports how many of keys are present. Duplicates are counted
 // separately, matching Redis.
 func (e *Engine) Exists(keys []string) int {

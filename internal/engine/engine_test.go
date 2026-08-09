@@ -885,3 +885,68 @@ func TestPersistedOrderMatchesAppliedOrder(t *testing.T) {
 		t.Fatalf("saw %d keys, want %d", len(last), writers)
 	}
 }
+
+// TestMGetReadsInRequestOrder covers the three answers MGET has to keep apart:
+// a value, an empty value, and no key at all. The empty one is the case a
+// `Value != ""` check gets wrong, so it is here rather than left to conformance.
+func TestMGetReadsInRequestOrder(t *testing.T) {
+	e := newTestEngine(t)
+	_ = e.Set("a", "1", NoExpiry())
+	_ = e.Set("empty", "", NoExpiry())
+
+	got := e.MGet([]string{"a", "empty", "missing", "a"})
+	want := []Optional{
+		{Value: "1", Found: true},
+		{Value: "", Found: true},
+		{Value: "", Found: false},
+		{Value: "1", Found: true},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("MGet returned %d results, want %d", len(got), len(want))
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("result %d = %+v, want %+v", i, got[i], want[i])
+		}
+	}
+}
+
+func TestMGetOnNoKeysReturnsEmpty(t *testing.T) {
+	e := newTestEngine(t)
+	if got := e.MGet(nil); len(got) != 0 {
+		t.Fatalf("MGet(nil) = %+v, want empty", got)
+	}
+}
+
+// TestMGetHidesExpiredKeysWithoutReclaiming is TestLazyExpirationHidesKeyWithout
+// Reclamation for the multi-key read: expiry is observed on the read path and
+// the entry is still physically there afterwards.
+func TestMGetHidesExpiredKeysWithoutReclaiming(t *testing.T) {
+	e, clock := newClockedEngine(t)
+	_ = e.Set("live", "1", NoExpiry())
+	_ = e.Set("doomed", "2", ExpiresIn(10*time.Second))
+
+	clock.advance(10 * time.Second)
+
+	got := e.MGet([]string{"live", "doomed"})
+	if !got[0].Found || got[0].Value != "1" {
+		t.Errorf("live key = %+v, want found with value 1", got[0])
+	}
+	if got[1].Found {
+		t.Errorf("expired key = %+v, want not found", got[1])
+	}
+	if n := e.physicalLen(); n != 2 {
+		t.Fatalf("a read reclaimed an entry: physical length = %d, want 2", n)
+	}
+}
+
+// MGET is a read, and reads keep working after the mutation gate closes.
+func TestMGetWorksWhileDraining(t *testing.T) {
+	e := newTestEngine(t)
+	_ = e.Set("a", "1", NoExpiry())
+	e.BeginDrain()
+
+	if got := e.MGet([]string{"a"}); !got[0].Found || got[0].Value != "1" {
+		t.Fatalf("MGet during drain = %+v, want found with value 1", got[0])
+	}
+}
