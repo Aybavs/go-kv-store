@@ -15,3 +15,6 @@ AGENTS.md
 
 # macOS
 .DS_Store
+
+# Profiles from `make bench-profile`.
+*.prof

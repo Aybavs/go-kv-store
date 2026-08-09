@@ -1,6 +1,6 @@
 BINARY := kv-server
 
-.PHONY: build run test test-race conformance lint bench clean
+.PHONY: build run test test-race conformance lint bench bench-e2e bench-profile clean
 
 build:
 	go build -o bin/$(BINARY) ./cmd/kv-server
@@ -33,5 +33,14 @@ lint:
 bench:
 	go test -bench=. -benchmem -run='^$$' ./...
 
+# The end-to-end harness. Not part of `make test`: it takes minutes, and a
+# benchmark that CI must pass is one that gets weakened to keep CI green.
+bench-e2e:
+	KV_BENCH=1 go test -count=1 -timeout 30m -v -run TestBenchEndToEnd ./internal/server/
+
+bench-profile:
+	KV_BENCH=1 KV_BENCH_PROFILE=cpu.prof go test -count=1 -timeout 30m -v -run TestBenchProfile ./internal/server/
+	@echo "now: go tool pprof -top -nodecount=15 cpu.prof"
+
 clean:
-	rm -rf bin
+	rm -rf bin cpu.prof
