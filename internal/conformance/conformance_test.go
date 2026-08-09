@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strconv"
 	"strings"
@@ -190,6 +191,8 @@ func errorClass(msg string) string {
 	// comparison passes without comparing anything.
 	case strings.Contains(msg, "would overflow"):
 		return "overflow"
+	case strings.Contains(msg, "invalid cursor"):
+		return "invalid-cursor"
 	default:
 		return "other"
 	}
@@ -318,6 +321,15 @@ var scenarios = map[string][]step{
 	"expire wrong arity":    {cmd("EXPIRE", "a")},
 	"ttl wrong arity":       {cmd("TTL")},
 	"persist wrong arity":   {cmd("PERSIST")},
+
+	// Key discovery. Ordinary KEYS and SCAN replies are intentionally absent:
+	// KEYS order and SCAN cursor/page boundaries are implementation details, so
+	// TestDiscoveryMatchesRedisOnStableDataset compares their complete sets.
+	"scan invalid cursor": {cmd("SCAN", "nope")},
+	"scan count zero":     {cmd("SCAN", "0", "COUNT", "0")},
+	"scan count invalid":  {cmd("SCAN", "0", "COUNT", "nope")},
+	"scan missing match":  {cmd("SCAN", "0", "MATCH")},
+	"dbsize empty":        {cmd("DBSIZE")},
 }
 
 func makeString(n int) string {
@@ -470,6 +482,96 @@ func do(t *testing.T, conn redis.Conn, args ...interface{}) string {
 	return normalise(t, reply, err)
 }
 
+func stringSet(values []string) map[string]struct{} {
+	out := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		out[value] = struct{}{}
+	}
+	return out
+}
+
+func collectScan(t *testing.T, conn redis.Conn, pattern string, count int) map[string]struct{} {
+	t.Helper()
+	out := map[string]struct{}{}
+	seenCursors := map[string]struct{}{}
+	cursor := "0"
+	for first := true; first || cursor != "0"; first = false {
+		if _, exists := seenCursors[cursor]; exists {
+			t.Fatalf("SCAN repeated cursor %q", cursor)
+		}
+		seenCursors[cursor] = struct{}{}
+
+		reply, err := redis.Values(conn.Do("SCAN", cursor, "MATCH", pattern, "COUNT", count))
+		if err != nil {
+			t.Fatalf("SCAN %s: %v", cursor, err)
+		}
+		var keys []string
+		if _, err := redis.Scan(reply, &cursor, &keys); err != nil {
+			t.Fatalf("decode SCAN: %v", err)
+		}
+		for _, key := range keys {
+			if _, exists := out[key]; exists {
+				t.Fatalf("SCAN returned key %q more than once", key)
+			}
+			out[key] = struct{}{}
+		}
+	}
+	return out
+}
+
+// TestDiscoveryMatchesRedisOnStableDataset compares only observable discovery
+// results. Redis may choose a different KEYS order or SCAN cursor/page layout;
+// on a stable dataset, the complete matching key set and cardinality must agree.
+func TestDiscoveryMatchesRedisOnStableDataset(t *testing.T) {
+	targets := []struct {
+		name    string
+		addr    string
+		isRedis bool
+	}{
+		{"ours", startOurServer(t), false},
+		{"redis", redisAddr(t), true},
+	}
+	keys := []string{"alpha", "alpine", "beta", "classa", "classb", "literal*", "q?mark", "é", "binary\x00\xff"}
+	patterns := []string{"*", "alp*", "alph?", "class[ab]", "class[^a]", "literal\\*", "q\\?mark", "??", "binary??"}
+
+	type result struct {
+		size  int64
+		keys  map[string]map[string]struct{}
+		scans map[string]map[string]struct{}
+	}
+	results := map[string]result{}
+	for _, target := range targets {
+		conn := dial(t, target.addr)
+		if target.isRedis {
+			if _, err := conn.Do("FLUSHDB"); err != nil {
+				t.Fatal(err)
+			}
+		}
+		for _, key := range keys {
+			if _, err := conn.Do("SET", key, "v"); err != nil {
+				t.Fatalf("%s SET %q: %v", target.name, key, err)
+			}
+		}
+		size, err := redis.Int64(conn.Do("DBSIZE"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		r := result{size: size, keys: map[string]map[string]struct{}{}, scans: map[string]map[string]struct{}{}}
+		for _, pattern := range patterns {
+			gotKeys, err := redis.Strings(conn.Do("KEYS", pattern))
+			if err != nil {
+				t.Fatal(err)
+			}
+			r.keys[pattern] = stringSet(gotKeys)
+			r.scans[pattern] = collectScan(t, conn, pattern, 3)
+		}
+		results[target.name] = r
+	}
+	if !reflect.DeepEqual(results["ours"], results["redis"]) {
+		t.Fatalf("discovery mismatch:\nours:  %#v\nredis: %#v", results["ours"], results["redis"])
+	}
+}
+
 // TestExpiryIsObservedByBothServers is the one place in this suite where
 // waiting is legitimate. Everywhere else time is a parameter and expiry is
 // reached by moving a clock; Redis's clock is genuinely out of reach, so the
@@ -541,13 +643,23 @@ func TestExpiredKeyIsInvisibleToEveryRead(t *testing.T) {
 			t.Fatalf("SET: %v", err)
 		}
 		time.Sleep(600 * time.Millisecond)
-		return []string{
+		out := []string{
 			do(t, conn, "GET", "k"),
 			do(t, conn, "EXISTS", "k"),
 			do(t, conn, "TTL", "k"),
 			do(t, conn, "PERSIST", "k"),
-			do(t, conn, "DEL", "k"),
 		}
+		if got := do(t, conn, "DBSIZE"); got != "INT:0" {
+			t.Errorf("DBSIZE after expiry = %s, want INT:0", got)
+		}
+		keys, err := redis.Strings(conn.Do("KEYS", "*"))
+		if err != nil || len(keys) != 0 {
+			t.Errorf("KEYS after expiry = %q, %v", keys, err)
+		}
+		if got := collectScan(t, conn, "*", 1); len(got) != 0 {
+			t.Errorf("SCAN after expiry = %q, want empty", got)
+		}
+		return append(out, do(t, conn, "DEL", "k"))
 	}
 
 	ours := probe(startOurServer(t), false)
