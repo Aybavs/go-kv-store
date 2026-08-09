@@ -1,12 +1,17 @@
 # Benchmarks
 
-Micro-benchmarks, current as of v0.3.0. End-to-end throughput and latency
+Micro-benchmarks, current as of v0.4.0. End-to-end throughput and latency
 distributions arrive in v0.5.
 
 Every number here comes from an actual run on the machine named below. Nothing
 is estimated, and nothing is carried over from an earlier version — carrying
-numbers forward is what let a 55% regression sit unnoticed, as the last section
-describes.
+numbers forward is what let a 55% regression sit unnoticed, as one of the
+sections below describes.
+
+One artefact is deliberately kept from v0.3.0 and labelled as such: the CPU
+profile at the end. It is a profile rather than a number, nothing on the syscall
+path changed in v0.4, and the end-to-end tables above were re-measured and agree
+with what it says.
 
 ## Environment
 
@@ -21,27 +26,54 @@ describes.
 
 ```
 pkg: github.com/aybavs/go-kv-store/internal/engine
-BenchmarkEngineSet-10                           27088570   41.64 ns/op	       0 B/op	       0 allocs/op
-BenchmarkEngineGet-10                           75994660   15.99 ns/op	       0 B/op	       0 allocs/op
-BenchmarkEngineParallelReads-10                 11567928   101.5 ns/op	       0 B/op	       0 allocs/op
-BenchmarkEngineParallelMixed-10                 14622577   83.70 ns/op	       0 B/op	       0 allocs/op
-BenchmarkEngineSetLoggedEverysec-10              1241560   947.0 ns/op	      64 B/op	       2 allocs/op
-BenchmarkEngineSetLoggedAlways-10                1000000   1007 ns/op	      64 B/op	       2 allocs/op
-BenchmarkEngineSetLoggedToDisk-10                    388   3713027 ns/op	      64 B/op	       2 allocs/op
-BenchmarkEngineSetLoggedToDiskParallel-10           1879   755708 ns/op	      99 B/op	       1 allocs/op
+BenchmarkEngineSet-10                           26613415   42.10 ns/op	       0 B/op	       0 allocs/op
+BenchmarkEngineGet-10                           73244793   16.18 ns/op	       0 B/op	       0 allocs/op
+BenchmarkEngineMGet-10                          11357994   98.74 ns/op	      96 B/op	       1 allocs/op
+BenchmarkEngineIncr-10                          12001899   101.8 ns/op	       7 B/op	       0 allocs/op
+BenchmarkEngineIncrWithTTL-10                    6745112   180.2 ns/op	       7 B/op	       0 allocs/op
+BenchmarkEngineParallelReads-10                 11195404   97.91 ns/op	       0 B/op	       0 allocs/op
+BenchmarkEngineParallelMixed-10                 14981140   78.06 ns/op	       0 B/op	       0 allocs/op
+BenchmarkEngineSetLoggedEverysec-10              1286781   928.3 ns/op	      64 B/op	       2 allocs/op
+BenchmarkEngineSetLoggedAlways-10                1000000   1001 ns/op	      64 B/op	       2 allocs/op
+BenchmarkEngineSetLoggedToDisk-10                    386   3683548 ns/op	      64 B/op	       2 allocs/op
+BenchmarkEngineSetLoggedToDiskParallel-10           1911   753691 ns/op	     100 B/op	       1 allocs/op
 
 pkg: github.com/aybavs/go-kv-store/internal/resp
-BenchmarkReadCommand-10                         10887110   108.8 ns/op	 340.15 MB/s	       0 B/op	       0 allocs/op
-BenchmarkWriteBulk-10                           41956390   28.00 ns/op	       0 B/op	       0 allocs/op
-BenchmarkWriteError-10                          34273881   35.30 ns/op	       0 B/op	       0 allocs/op
+BenchmarkReadCommand-10                         11027164   105.6 ns/op	 350.38 MB/s	       0 B/op	       0 allocs/op
+BenchmarkWriteBulk-10                           41480030   28.15 ns/op	       0 B/op	       0 allocs/op
+BenchmarkWriteError-10                          33330092   35.45 ns/op	       0 B/op	       0 allocs/op
 
 pkg: github.com/aybavs/go-kv-store/internal/store
-BenchmarkStoreSet-10                            84531092   14.13 ns/op	       0 B/op	       0 allocs/op
-BenchmarkStoreSetWithTTL-10                     49405674   24.34 ns/op	       0 B/op	       0 allocs/op
-BenchmarkStoreGetHit-10                        100000000   10.77 ns/op	       0 B/op	       0 allocs/op
-BenchmarkStoreGetHitWithTTL-10                  67418256   18.34 ns/op	       0 B/op	       0 allocs/op
-BenchmarkStoreGetMiss-10                       240436652   5.247 ns/op	       0 B/op	       0 allocs/op
+BenchmarkStoreSet-10                            84244201   14.14 ns/op	       0 B/op	       0 allocs/op
+BenchmarkStoreSetWithTTL-10                     49243227   24.45 ns/op	       0 B/op	       0 allocs/op
+BenchmarkStoreGetHit-10                        100000000   10.96 ns/op	       0 B/op	       0 allocs/op
+BenchmarkStoreGetHitWithTTL-10                  63959635   18.54 ns/op	       0 B/op	       0 allocs/op
+BenchmarkStoreGetMiss-10                       227094896   5.244 ns/op	       0 B/op	       0 allocs/op
 ```
+
+## What the v0.4 commands cost
+
+| | ns/op | allocs |
+|---|---|---|
+| `EngineGet` | 16.2 | 0 |
+| `EngineMGet` (4 keys) | 98.7 | 1 |
+| `EngineSet` | 42.1 | 0 |
+| `EngineIncr` | 101.8 | 0 |
+| `EngineIncrWithTTL` | 180.2 | 0 |
+
+`MGET`'s one allocation is the result slice, which is the return value itself
+and not avoidable without handing the caller a buffer to fill.
+
+**The gap between the two `Incr` figures is the clock, not the expiry lookup.**
+`time.Now` costs about 54 ns on this machine — the same measurement that made
+`EngineGet` five times faster in v0.2 — and `IncrBy` reads it only when some key
+in the store carries a deadline. The first figure is a store with no expiries at
+all, where the clock is skipped entirely; the second has one, so it is read.
+Written the obvious way, with an unconditional `e.now()`, `EngineIncr` measured
+**151 ns**. The map lookup that produces the record's `PXAT` is a few
+nanoseconds of the difference; the clock is the rest.
+
+
 
 ## What persistence costs
 
@@ -97,50 +129,95 @@ otherwise, it will say so with a number.
 
 ## End to end, and the answer to the sharding question
 
-The micro-benchmarks below measure operations in isolation. This section
+The micro-benchmarks above measure operations in isolation. This section
 measures the server, with a client, over a socket — which is what decides
 whether any of them matter.
 
 `redis-benchmark` works against this server unmodified, which is one of the
 things ADR-0002 chose the RESP2 subset for. Both servers run natively on the
-same machine, one at a time, with the same client and parameters.
+same machine, one at a time, with the same client and parameters. Every figure
+below is the **median of three runs**, and the runs themselves are reported
+where the spread matters.
+
+    redis-benchmark -p <port> -t set,get -n 100000 -c 50 -q
+    redis-benchmark -p <port> -t get      -n  20000 -c 1  -q
+
+### A measurement error caught before it was published
+
+The first pass at these numbers had Redis started with `--daemonize yes`. That
+instance answered a single-connection `GET` benchmark at **10 035 rps with a p50
+of 0.095 ms**, against our 35 236 rps at 0.023 ms — a result that would have let
+this file claim we are three times faster than Redis. The same Redis build
+started in the foreground answers **35 971 rps at 0.023 ms**.
+
+So the finding was about how the oracle was launched, not about either server.
+It is recorded because the wrong number was flattering, which is exactly when a
+measurement gets published without a second look.
+
+### Throughput
 
 | 50 connections | SET rps | GET rps | p50 |
 |---|---|---|---|
-| Redis 8.10 | 117 716 | 115 407 | 0.215 ms |
-| go-kv-store | 99 010 | 91 785 | 0.263 / 0.295 ms |
-| go-kv-store, `--appendonly --appendfsync everysec` | 83 577 | 92 807 | 0.335 / 0.279 ms |
+| Redis 8.10 | 122 549 | 119 332 | 0.215 ms |
+| go-kv-store | 101 523 | 102 881 | 0.263 ms |
 
 | 1 connection | GET rps | p50 |
 |---|---|---|
-| Redis 8.10 | 34 722 | 0.023 ms |
-| go-kv-store | 33 613 | 0.023 ms |
+| Redis 8.10 | 36 563 | 0.023 ms |
+| go-kv-store | 35 399 | 0.023 ms |
 
 At one connection the two are within 3% of each other: both are bound by the
 round trip, and our per-request work is not the difference. The gap appears only
-under concurrency, where we reach roughly 80–84% of Redis.
+under concurrency, where we reach roughly 83–86% of Redis.
 
-Persistence costs about 16% of write throughput under `everysec` and nothing at
-all on reads, which is what it should do — reads never touch the log.
+**Our run-to-run spread is much wider than Redis's**, and that is worth stating
+rather than hiding behind a median. Across three runs Redis varied by 0.6% on
+`SET`; we varied by 9%. A single-threaded event loop has less scheduling
+variance to expose than a goroutine per connection does.
+
+### What `everysec` costs, and what the noise will and will not support
+
+Measured as four interleaved pairs, so drift affects both sides equally:
+
+| plain SET rps | `everysec` SET rps | delta |
+|---|---|---|
+| 105 152 | 108 696 | +3% |
+| 117 371 | 109 051 | −7% |
+| 115 875 | 95 147 | −18% |
+| 116 686 | 107 296 | −8% |
+
+Median cost about 7%, and reads are unaffected — they never touch the log, which
+is the behaviour that matters. But the pair-to-pair range runs from +3% to −18%,
+so **only the direction and rough magnitude should be taken from this table**.
+The isolated cost of the commit path is in the micro-benchmarks above, where it
+can be measured without a network in the way. v0.3.0 reported 16% from a single
+pass; that figure sits inside this spread and should not have been quoted to two
+significant figures.
 
 ### Throughput does not change with core count
 
+Median of three runs each, `GET` over 50 connections:
+
 | GOMAXPROCS | GET rps |
 |---|---|
-| 1 | 121 704 |
-| 2 | 124 095 |
-| 4 | 115 942 |
-| 8 | 100 587 |
-| 10 | 114 833 |
+| 1 | 124 224 |
+| 2 | 122 249 |
+| 4 | 118 906 |
+| 8 | 116 550 |
+| 10 | 116 279 |
 
-Flat. That single table settles the sharding question on its own: the engine's
-read path costs 4× more per operation at ten cores than at one, so if the lock
-were anywhere near the limit, end-to-end throughput at one core would be
-visibly higher than at ten. It is not.
+Flat, with a slight decline. That single table settles the sharding question on
+its own: the engine's read path costs 4× more per operation at ten cores than at
+one, so if the lock were anywhere near the limit, end-to-end throughput at one
+core would be visibly higher than at ten. It is not — and one core is in fact
+the *fastest* configuration by a few percent, which points the other way
+entirely.
 
 ### The profile says the same thing more bluntly
 
-300 000 GETs over 50 connections, CPU profile of the server:
+Measured at v0.3.0 and kept, per the note at the top of this file: nothing on
+the syscall path changed in v0.4, and the re-measured tables above agree with
+what it says. 300 000 GETs over 50 connections, CPU profile of the server:
 
 ```
       flat  flat%   cum%
@@ -183,23 +260,25 @@ it is across core counts:
 
 | cores | reads ns/op | reads M ops/s | mixed ns/op | mixed M ops/s |
 |---|---|---|---|---|
-| 1 | 23.1 | 43.3 | 27.2 | 36.8 |
-| 2 | 76.7 | 13.0 | 57.5 | 17.4 |
-| 4 | 81.7 | 12.2 | 66.2 | 15.1 |
-| 8 | 111.2 | 9.0 | 75.2 | 13.3 |
-| 10 | 101.3 | 9.9 | 83.0 | 12.1 |
+| 1 | 22.4 | 44.7 | 27.6 | 36.2 |
+| 2 | 68.1 | 14.7 | 52.7 | 19.0 |
+| 4 | 79.8 | 12.5 | 68.5 | 14.6 |
+| 8 | 129.3 | 7.7 | 81.5 | 12.3 |
+| 10 | 107.6 | 9.3 | 88.8 | 11.3 |
 
 **Total throughput falls as cores are added.** Going from one core to two costs
-3.3×. This is a property of `sync.RWMutex`, not a defect here: `RLock`
+3.0×. This is a property of `sync.RWMutex`, not a defect here: `RLock`
 increments a counter shared by every reader, so the cache line holding it
 ping-pongs between cores, and that costs more than serialising would.
 
-**This is not on its own an argument for sharding.** The loop does nothing but
-lock, read and unlock. A real request also parses a command — 108 ns before the
-engine is reached — and makes syscalls, which cost microseconds. What fraction
-of a real request the lock actually is remains unmeasured, and that is what the
-end-to-end work in v0.5 is for. ADR-0001's rule stands: sharding is a decision
-to be made against profiling data, and this is not yet that data.
+**This is not on its own an argument for sharding, and the end-to-end section
+above is why.** The loop does nothing but lock, read and unlock. A real request
+also parses a command — 106 ns before the engine is reached — and makes
+syscalls, which cost microseconds. Measured end to end, throughput does not
+improve with core count and the lock does not appear in the profile at all. So
+this table describes a real property of `sync.RWMutex` that a real request never
+gets near. ADR-0001 reserved sharding for the case where profiling justified it;
+the profiling exists now and does not.
 
 One observation worth carrying into v0.5 rather than explaining away here: the
 mixed workload is *faster* than the pure-read one above two cores, which is
@@ -224,12 +303,13 @@ before the timer starts.
 
 ## Notes
 
-- These measure in-process operations only. No network, no persistence.
-- No comparison against Redis is made here. `redis-benchmark` will be used in
-  v0.5 as an ecosystem baseline, and even then the comparison is not
-  apples-to-apples: the two servers do not offer the same feature set or the
-  same durability guarantees.
+- The micro-benchmarks measure in-process operations only. No network.
+- The Redis comparison in the end-to-end section is **not** a claim that either
+  implementation is faster. The two do not offer the same feature set or the
+  same durability guarantees. It is a sanity check that our per-request work is
+  in the same range as a mature implementation's, and at one connection it is.
 - Numbers from a laptop under an unpinned CPU governor are indicative, not
   reproducible to the last percent. Re-run before drawing a conclusion from a
-  difference smaller than the spread between two consecutive runs, which was a
-  few percent on this machine.
+  difference smaller than the run-to-run spread — measured at up to 9% for the
+  end-to-end figures on this machine, and a few percent for the in-process
+  ones.

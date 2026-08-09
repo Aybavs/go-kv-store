@@ -26,10 +26,12 @@ transactions and additional data types are explicit non-goals.
 - [x] Startup recovery, torn-tail truncation, refusal on structural corruption
 - [x] Fail-stop and fatal semantics on persistence failure
 
-## v0.4 — Extended commands
+## v0.4 — Extended commands ✅
 
-- [ ] `MGET`, `INCR`, `DECR`
-- [ ] Seeded, bounded command-sequence generator for differential testing
+- [x] `MGET`, `INCR`, `DECR` — `INCR`/`DECR` preserve any existing expiry
+- [x] Seeded, bounded command-sequence generator for differential testing
+- [x] The same generated sequences replayed through the append-only file and
+      compared against live state, checked after every step
 
 ## v0.5 — Performance
 

@@ -23,10 +23,10 @@ RESP2 or fail to connect.
 |---|---|---|
 | Simple String | `+OK\r\n` | `SET`, `PING` |
 | Error | `-ERR ...\r\n` | any failure |
-| Integer | `:1\r\n` | `DEL`, `EXISTS` |
+| Integer | `:1\r\n` | `DEL`, `EXISTS`, `INCR`, `DECR` |
 | Bulk String | `$3\r\nfoo\r\n` | `GET` |
-| Null Bulk String | `$-1\r\n` | `GET` on a missing key |
-| Array | `*2\r\n...` | reserved for `MGET` (v0.4) |
+| Null Bulk String | `$-1\r\n` | `GET` on a missing key, and each missing key inside an `MGET` |
+| Array | `*2\r\n...` | `MGET` |
 
 Simple String and Error replies are single lines terminated by the CRLF the
 encoder appends, so they carry no length prefix. Any CR or LF inside such a
@@ -37,7 +37,7 @@ additional reply, permanently desynchronising a pipelining client. Bulk strings
 are length-prefixed and are therefore exempt — CR and LF inside a value are
 payload and are returned unaltered.
 
-## Commands (v0.1.0)
+## Commands
 
 | Command | Arity | Reply |
 |---|---|---|
@@ -49,6 +49,9 @@ payload and are returned unaltered.
 | `EXPIRE key seconds` | 3 | Integer: `1` applied, `0` no such key |
 | `TTL key` | 2 | Integer: `-2` no key, `-1` no TTL, else seconds |
 | `PERSIST key` | 2 | Integer: `1` a TTL was removed, `0` otherwise |
+| `MGET key [key ...]` | ≥2 | Array, one element per key in request order |
+| `INCR key` | 2 | Integer: the value after adding one |
+| `DECR key` | 2 | Integer: the value after subtracting one |
 
 Command names are case-insensitive. Keys and values are binary-safe: any byte
 sequence is permitted, including NUL and CRLF.
@@ -77,6 +80,31 @@ existed, rather than rejecting the call.
 | non-integer value | `ERR value is not an integer or out of range` |
 | zero, negative or out-of-range value | `ERR invalid expire time in '<command>' command` |
 
+## Counters
+
+`INCR` and `DECR` add or subtract one and reply with the result. A key that is
+missing, or expired and not yet reclaimed, counts as zero, so `INCR` on a fresh
+key replies `1` and `DECR` replies `-1`. The result is stored as its decimal
+text and is an ordinary string value afterwards.
+
+**Any expiry the key already carries is preserved exactly**, not refreshed and
+not dropped. This is the one behaviour of these two commands worth stating on
+its own: the append-only file records `SET key <result> PXAT <the same absolute
+deadline>`, so a key that survives a crash comes back with the expiry it had.
+
+**The incrementable-value grammar is narrower than Go's `strconv.ParseInt`.** A
+value is incrementable when it is `0`, or an optional `-` followed by a digit
+`1`–`9` and further digits, and fits in an int64. So `+5`, `07`, `00` and `-0`
+are **not** incrementable, although Go's standard library parses all four. This
+matches Redis and was measured against it rather than assumed.
+
+| Counter error | Reply |
+|---|---|
+| the value is not incrementable | `ERR value is not an integer or out of range` |
+| the result would not fit in an int64 | `ERR increment or decrement would overflow` |
+
+Neither error changes anything: the value and its expiry are left as they were.
+
 ## Error classes
 
 Conformance tests compare error **class**, not exact message text.
@@ -88,6 +116,7 @@ Conformance tests compare error **class**, not exact message text.
 | syntax error | `ERR syntax error` | stays open |
 | not an integer | `ERR value is not an integer or out of range` | stays open |
 | invalid expire time | `ERR invalid expire time in '<name>' command` | stays open |
+| overflow | `ERR increment or decrement would overflow` | stays open |
 | shutting down | `ERR server is shutting down` | stays open |
 | internal error | `ERR internal error` | stays open |
 | max clients | `ERR max number of clients reached` | **closed** |
@@ -125,6 +154,10 @@ Both are pinned by tests in `internal/command`.
   replies to an option it does not recognise — so the texts agree while the
   behaviour does not.
 - `PTTL`, `PEXPIRE`, `EXPIREAT` and `PEXPIREAT` are not implemented.
+- `MSET`, `INCRBY`, `DECRBY`, `INCRBYFLOAT`, `GETSET` and `SETNX` are not
+  implemented. `MSET` is a deliberate omission rather than a gap: it cannot be
+  expressed as a single canonical append-only record, and one complete record is
+  one recovery atomicity unit.
 - An empty request array (`*0`) is a protocol error here and closes the
   connection. The `command` layer also carries an `ERR empty command` reply for
   a zero-argument dispatch, but the decoder rejects `*0` first, so that reply is

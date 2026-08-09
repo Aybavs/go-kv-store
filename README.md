@@ -39,6 +39,9 @@ mattered are written down in [docs/design-decisions](docs/design-decisions).
   copied to an immutable string, asserted by dedicated tests
 - **Graceful shutdown that means something** — mutation admission closes inside
   the commit lock, so a request cannot slip in after draining begins
+- **Seeded command-sequence generation** — bounded random sequences over a small
+  key space, run against both Redis and our own crash recovery, because the
+  states worth testing are the ones nobody thinks to write down
 
 ## Architecture
 
@@ -83,6 +86,8 @@ With Docker:
 | `EXPIRE key seconds` | `1` if applied, `0` if no such key |
 | `TTL key` | seconds left, `-1` no TTL, `-2` no key |
 | `PERSIST key` | `1` if a TTL was removed, `0` otherwise |
+| `MGET key [key ...]` | one value per key, nil where absent |
+| `INCR key` / `DECR key` | the value after the change; any TTL is preserved |
 
 Full wire format, error classes and the deviations from Redis are in
 [docs/protocol.md](docs/protocol.md).
@@ -147,7 +152,11 @@ Stated plainly rather than buried:
   completeness.
 - **Expiration is per-key only.** No eviction policy and no maxmemory.
 - **Strings only.** No List, Hash or Set.
-- **No transactions, no Pub/Sub, no `MSET`.**
+- **No transactions and no Pub/Sub.**
+- **No `MSET`.** Not an oversight: it cannot be expressed as one canonical
+  append-only record, and one complete record is one recovery atomicity unit.
+  Extending the record vocabulary is a decision for its own milestone. `MGET` is
+  here because it is read-only and never touches the log.
 - **The dataset must fit in memory.** There is no eviction policy.
 - **Not intended for production workloads.**
 
