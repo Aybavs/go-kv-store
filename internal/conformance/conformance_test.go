@@ -185,6 +185,11 @@ func errorClass(msg string) string {
 		return "not-an-integer"
 	case strings.Contains(msg, "invalid expire time"):
 		return "invalid-expire-time"
+	// Its own class, not a variant of not-an-integer. Without this row both
+	// servers report "other" for every overflow scenario below and the whole
+	// comparison passes without comparing anything.
+	case strings.Contains(msg, "would overflow"):
+		return "overflow"
 	default:
 		return "other"
 	}
@@ -224,6 +229,43 @@ var scenarios = map[string][]step{
 	"mget key with ttl": {cmd("SET", "a", "1", "EX", "100"), cmd("MGET", "a")},
 	"mget long value":   {cmd("SET", "a", makeString(70000)), cmd("MGET", "a")},
 	"mget wrong arity":  {cmd("MGET")},
+	// INCR and DECR. The value-grammar rows are the point: Go's strconv accepts
+	// "+5", "07", "00" and "-0", and Redis accepts none of them, so those four
+	// are exactly where an implementation built on the standard library
+	// diverges from the oracle.
+	"incr missing key":       {cmd("INCR", "n"), cmd("GET", "n")},
+	"decr missing key":       {cmd("DECR", "n"), cmd("GET", "n")},
+	"incr existing":          {cmd("SET", "n", "5"), cmd("INCR", "n"), cmd("GET", "n")},
+	"decr existing":          {cmd("SET", "n", "5"), cmd("DECR", "n"), cmd("GET", "n")},
+	"incr zero":              {cmd("SET", "n", "0"), cmd("INCR", "n")},
+	"incr negative":          {cmd("SET", "n", "-3"), cmd("INCR", "n")},
+	"decr below zero":        {cmd("DECR", "n"), cmd("DECR", "n")},
+	"incr plus sign":         {cmd("SET", "n", "+5"), cmd("INCR", "n"), cmd("GET", "n")},
+	"incr leading zero":      {cmd("SET", "n", "07"), cmd("INCR", "n"), cmd("GET", "n")},
+	"incr double zero":       {cmd("SET", "n", "00"), cmd("INCR", "n")},
+	"incr negative zero":     {cmd("SET", "n", "-0"), cmd("INCR", "n")},
+	"incr leading space":     {cmd("SET", "n", " 5"), cmd("INCR", "n")},
+	"incr trailing space":    {cmd("SET", "n", "5 "), cmd("INCR", "n")},
+	"incr non numeric":       {cmd("SET", "n", "abc"), cmd("INCR", "n"), cmd("GET", "n")},
+	"incr empty value":       {cmd("SET", "n", ""), cmd("INCR", "n")},
+	"incr float value":       {cmd("SET", "n", "3.0"), cmd("INCR", "n")},
+	"incr binary value":      {cmd("SET", "n", "5\r\n"), cmd("INCR", "n")},
+	"incr beyond int64":      {cmd("SET", "n", "92233720368547758080"), cmd("INCR", "n")},
+	"incr overflows":         {cmd("SET", "n", "9223372036854775807"), cmd("INCR", "n"), cmd("GET", "n")},
+	"decr underflows":        {cmd("SET", "n", "-9223372036854775808"), cmd("DECR", "n"), cmd("GET", "n")},
+	"decr from the maximum":  {cmd("SET", "n", "9223372036854775807"), cmd("DECR", "n")},
+	"incr keeps ttl":         {cmd("SET", "n", "5", "EX", "100"), cmd("INCR", "n"), cmd("TTL", "n")},
+	"decr keeps ttl":         {cmd("SET", "n", "5", "EX", "100"), cmd("DECR", "n"), cmd("TTL", "n")},
+	"incr creates no ttl":    {cmd("INCR", "n"), cmd("TTL", "n")},
+	"incr after persist":     {cmd("SET", "n", "5", "EX", "100"), cmd("PERSIST", "n"), cmd("INCR", "n"), cmd("TTL", "n")},
+	"incr after expire":      {cmd("SET", "n", "5"), cmd("EXPIRE", "n", "100"), cmd("INCR", "n"), cmd("TTL", "n")},
+	"incr then mget":         {cmd("INCR", "n"), cmd("INCR", "n"), cmd("MGET", "n", "nope")},
+	"incr after del":         {cmd("SET", "n", "5"), cmd("DEL", "n"), cmd("INCR", "n")},
+	"incr rejected is inert": {cmd("SET", "n", "abc"), cmd("INCR", "n"), cmd("INCR", "n"), cmd("GET", "n")},
+	"incr wrong arity":       {cmd("INCR")},
+	"decr wrong arity":       {cmd("DECR")},
+	"incr too many args":     {cmd("INCR", "a", "b")},
+
 	"unknown command":   {cmd("TOTALLYBOGUS")},
 	"unknown lowercase": {cmd("totallybogus")},
 	"set wrong arity":   {cmd("SET", "only-key")},
