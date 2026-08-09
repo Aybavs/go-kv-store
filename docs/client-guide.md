@@ -4,25 +4,22 @@ What you need to talk to this server, in the order you will need it. Every byte
 sequence below was captured from a running server, not written from memory.
 
 [docs/protocol.md](protocol.md) is the reference: every command, every error
-class, every limit. This page is the narrative, and it starts with the part that
-decides what your application can be.
+class, every limit. This page is the narrative, and it starts with the
+boundaries that decide what your application can be.
 
 ## Start here: what this server cannot do
 
 These are not gaps to work around. They are the scope, and they shape a user
 interface more than anything else here.
 
-**You cannot list keys.** There is no `KEYS`, no `SCAN`, no `DBSIZE`, no
-`RANDOMKEY`. A client can only ask about a key it already knows the name of.
+**Key discovery is bounded and pull-based.** Use `SCAN` for a browser and
+`DBSIZE` for the logically live count. `KEYS` exists for debugging and small
+datasets, but it walks the whole keyspace in one call. There is no `RANDOMKEY`.
 
-An application built on this is a **console**, not a browser: the user names a
-key and you show it. If your interface needs a list, the list has to be yours —
-keys the user has entered or that you have written — kept on the client side and
-understood as a view of what *this* client did, not of what the server holds.
-
-**There is no change notification.** No Pub/Sub, no keyspace events, no
-`MONITOR`. If a value can change from elsewhere, the only way to notice is to
-ask again. Poll at a rate you can defend; there is nothing to subscribe to.
+**There is no change notification.** No Pub/Sub, no keyspace notifications, no
+`MONITOR`. A completed `SCAN` is one point-in-time list, not a live view. Offer
+an explicit refresh and, if the interface needs to stay current, poll at a rate
+you can defend; there is nothing to subscribe to.
 
 **There is no server introspection.** No `INFO`, no `COMMAND`, no `CLIENT`. You
 cannot build a statistics panel, and you cannot ask the server what it supports —
@@ -94,8 +91,59 @@ Two rules that save trouble:
 
 - **A null bulk is not an empty string.** `GET` on a missing key gives `$-1`;
   `GET` on a key holding `""` gives `$0\r\n\r\n`. Model it as an optional.
-- **Arrays are flat here.** Only `MGET` returns one, and its elements are bulk
-  strings or nulls. Nothing nests.
+- **Reply parsing must be recursive.** `MGET` is a flat array of bulk strings or
+  nulls, but `SCAN` returns an array containing a bulk cursor and another array.
+  Do not special-case array elements as bulk strings.
+
+In Swift, keep binary payloads as `Data` and make the reply model recursive:
+
+```swift
+indirect enum RESPValue {
+    case simple(String)
+    case error(String)
+    case integer(Int64)
+    case bulk(Data?)
+    case array([RESPValue])
+}
+```
+
+## Browsing keys with SCAN
+
+Start with `SCAN 0`. The response is always a two-element array: a decimal
+cursor bulk string and an array of key-name bulk strings. Pass the returned
+cursor to the next call until the returned cursor is `0`.
+
+The cursor is opaque and single-use. A successful nonterminal page replaces
+it, so persist only the most recently returned token and never compare, order,
+increment, or reuse cursor values. Malformed, negative, overflowing, unknown,
+expired, completed, consumed, and pre-restart cursors all return
+`ERR invalid cursor`; restart the traversal from `0` when that happens.
+
+`MATCH pattern` is fixed on the first call. Later calls may omit it or repeat
+the exact same bytes; changing it returns
+`ERR scan MATCH cannot change during iteration` without consuming the current
+cursor. `COUNT` defaults to 10 and may change on every call. It controls page
+size, not the cost of creating the snapshot: the initial call still copies all
+live names, filters them, and sorts the retained names. Continuations do none of
+that work again.
+
+A session expires after 30 seconds without a successful continuation. Across
+all clients the server keeps at most 16 unfinished traversals and a conservative
+128 MiB retained-memory estimate. A new traversal that would cross either bound
+gets `ERR scan session limit reached`; wait for an abandoned traversal to
+expire, finish one already in progress, or retry later. These limits are not
+client-configurable.
+
+The snapshot contains names, not values. A key created after the initial call
+will not appear. A returned name may have been deleted or expired before the
+browser issues `GET`, so treat a null result as normal and remove or mark that
+row. A value may also change while its name remains listed. If every replacement
+cursor is followed to `0`, every name matching at capture is returned exactly
+once. Clients must not depend on the current bytewise result order.
+
+For each refresh, keep the traversal's pages together as one generation: begin
+at `0`, accumulate until `0` returns, then replace the displayed list. Starting
+a new traversal is the only way to see external key additions or removals.
 
 ## Errors are values, not failures
 

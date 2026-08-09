@@ -1,17 +1,18 @@
 # Benchmarks
 
-Current as of v0.5.0. Micro-benchmarks, end-to-end throughput, latency
-distributions, and syscalls per command.
+The key-discovery gates are current as of v1.1.0. The remaining
+micro-benchmarks, end-to-end throughput, latency distributions, and syscall
+measurements are the v0.5.0 record; each historical comparison is labelled.
 
 Every number here comes from an actual run on the machine named below. Nothing
-is estimated, and nothing is carried over from an earlier version — carrying
-numbers forward is what let a 55% regression sit unnoticed, as one of the
-sections below describes.
+is estimated. Evidence retained from a previous implementation or version is
+explicitly labelled rather than presented as a current re-measurement.
 
-One artefact is deliberately kept from v0.3.0 and labelled as such: the CPU
-profile at the end. It is a profile rather than a number, nothing on the syscall
-path changed in v0.4, and the end-to-end tables above were re-measured and agree
-with what it says.
+Two historical artefacts are deliberately labelled: the rejected v1.1 SCAN
+baseline below, because it is the gate the replacement answers, and the v0.3.0
+CPU profile at the end. The profile is a profile rather than a number, nothing
+on the syscall path changed in v0.4, and the end-to-end tables were re-measured
+and agree with what it says.
 
 ## Environment
 
@@ -21,6 +22,130 @@ with what it says.
 | OS | macOS 26.4.1 (APFS, internal SSD) |
 | Go | go1.26.1 darwin/arm64 |
 | Command | `make bench` (`go test -bench=. -benchmem -run='^$' ./...`) |
+
+## Key discovery: the rejected baseline and accepted replacement
+
+Both gates ran in-process on the environment above. Normal desktop services
+were active, CPU frequency was not pinned, and these are developer-laptop
+figures rather than a service-level guarantee. Absolute differences smaller
+than the reported spread should not be over-interpreted. The traversal shape,
+allocation multiplication, and exact phase counters are the deciding evidence.
+
+### Rejected stateless baseline
+
+Commit `bff69c8` rebuilt and sorted every logically-live-key snapshot on every
+page. Reproduce that historical implementation from a separate worktree at the
+commit (the benchmark names changed with the replacement):
+
+```bash
+git worktree add /tmp/go-kv-scan-baseline bff69c8
+cd /tmp/go-kv-scan-baseline
+go test ./internal/store -run '^$' -bench BenchmarkStoreLiveKeys -benchmem -benchtime=100x -count=3
+go test ./internal/engine -run '^$' -bench 'BenchmarkDiscoveryPhases|BenchmarkEngineScanPage' -benchmem -benchtime=100x -count=3
+KV_ENUM_BENCH=1 go test ./internal/engine -run '^$' -bench BenchmarkEngineScanTraversal -benchmem -benchtime=1x -count=3 -timeout=0
+KV_ENUM_BENCH=1 go test -v ./internal/engine -run TestBenchDiscoveryContention -count=1
+cd -
+git worktree remove /tmp/go-kv-scan-baseline
+```
+
+The adaptive default was deliberately not used: timer-paused setup drove
+calibration into millions of iterations and spent minutes on excluded work.
+The fixed runs produced three repetitions for every row.
+
+| Keys | Snapshot under `RLock` | Sort outside lock | Filter COUNT 10 / 100 / 1000 |
+|---:|---:|---:|---:|
+| 1k | 25.076 µs, 16,384 B, 1 alloc | 69.187 µs | 0.456 / 3.665 / 32.068 µs |
+| 10k | 140.927 µs, 163,840 B, 1 alloc | 1.293 ms | 0.531 / 4.091 / 36.287 µs |
+| 100k | 1.307 ms, 1,605,632 B, 1 alloc | 20.678 ms | 0.549 / 4.432 / 41.287 µs |
+
+| Keys | COUNT | Single page mean | Page B/op; allocs/op | Complete traversal mean | Pages | Traversal B/op |
+|---:|---:|---:|---:|---:|---:|---:|
+| 1k | 10 | 138.256 µs | 16,384; 1 | 14.287 ms | 100 | 1,638,400 |
+| 1k | 100 | 137.185 µs | 16,384; 1 | 1.449 ms | 10 | 163,845 |
+| 1k | 1000 | 156.339 µs | 16,384; 1 | 174.125 µs | 1 | 16,384 |
+| 10k | 10 | 1.664 ms | 163,840; 1 | 1.644 s | 1,000 | 163,841,885 |
+| 10k | 100 | 1.666 ms | 163,840; 1 | 164.947 ms | 100 | 16,384,037 |
+| 10k | 1000 | 1.681 ms | 163,840; 1 | 16.512 ms | 10 | 1,638,400 |
+| 100k | 10 | 20.242 ms | 1,605,632; 1 | **199.710 s** | 10,000 | 16,056,322,285 |
+| 100k | 100 | 20.267 ms | 1,605,632; 1 | 19.872 s | 1,000 | 1,605,632,117 |
+| 100k | 1000 | 20.206 ms | 1,605,632; 1 | 1.990 s | 100 | 160,563,200 |
+
+`COUNT` changed only how many candidate entries were examined after the full
+snapshot and sort. It did not bound total call work. The roughly 10× traversal
+improvement for each 10× larger COUNT was repeated work disappearing, not a
+cheaper page. At 100k/COUNT 10, a traversal spent about 3 minutes 20 seconds and
+allocated 16.056 GB. The gate stopped before any index was introduced.
+
+Five interleaved baseline/loaded repetitions for GET and SET at each COUNT found
+no p50/p95/p99 delta larger than repetition noise. That did not clear the
+design: the measured 1.307 ms data-lock window and full allocation happened on
+every page, and the harness did not record maxima.
+
+### Accepted bounded snapshot sessions
+
+Commit `56dfc40` captures, filters and sorts once, then pages the retained names
+through the separate session lock. The accepted matrix used exactly 20
+iterations and three repetitions for all 63 rows. `caffeinate` matters on macOS:
+an otherwise identical first run was discarded after system suspension made
+67.726 seconds of Go package time take 2,634.90 seconds of wall time.
+
+```bash
+go test ./internal/engine -count=1
+go test -race ./internal/engine -count=1
+caffeinate -dimsu /usr/bin/time -lp env KV_ENUM_BENCH=1 go test ./internal/engine -run '^$' -bench 'BenchmarkScanSession(Creation|Continuation|Traversal|Cleanup|Concurrent)' -benchmem -benchtime=20x -count=3 -timeout=0
+caffeinate -dimsu /usr/bin/time -lp env KV_ENUM_BENCH=1 go test -v ./internal/engine -run '^TestBenchDiscoveryContention$' -count=1
+```
+
+| Keys | Snapshot under `RLock` | Full MATCH filter outside lock | Sort retained matches outside lock |
+|---:|---:|---:|---:|
+| 1k | 23.563 µs, 16,384 B, 1 alloc | 24.421 µs, 0 alloc | 84.785 µs, 0 alloc |
+| 10k | 154.744 µs, 163,840 B, 1 alloc | 196.442 µs, 0 alloc | 1.343 ms, 0 alloc |
+| 100k | 1.426 ms, 1,605,632 B, 1 alloc | 1.873 ms, 0 alloc | 18.655 ms, 0 alloc |
+
+| Keys | COUNT | First page mean | Continuation mean | Complete traversal | Pages | Traversal B/op; allocs/op |
+|---:|---:|---:|---:|---:|---:|---:|
+| 1k | 10 | 162.210 µs | 697.933 ns | 189.110 µs | 100 | 16,624; 3 |
+| 1k | 100 | 158.126 µs | 604.800 ns | 162.581 µs | 10 | 16,624; 3 |
+| 1k | 1000 | 156.462 µs | 375.600 ns (terminal) | 157.081 µs | 1 | 16,384; 1 |
+| 10k | 10 | 1.876 ms | 732.000 ns | 2.140 ms | 1,000 | 164,080; 3 |
+| 10k | 100 | 1.876 ms | 914.133 ns | 1.889 ms | 100 | 164,080; 3 |
+| 10k | 1000 | 1.873 ms | 757.000 ns | 1.859 ms | 10 | 164,080; 3 |
+| 100k | 10 | 22.096 ms | 1.237 µs | **24.746 ms** | 10,000 | 1,605,872; 3 |
+| 100k | 100 | 22.021 ms | 1.483 µs | 22.380 ms | 1,000 | 1,605,872; 3 |
+| 100k | 1000 | 22.045 ms | 1.458 µs | 22.028 ms | 100 | 1,605,872; 3 |
+
+The 1k/COUNT1000 continuation row is a real terminal-boundary measurement
+after a one-key setup page; a fresh 1k/COUNT1000 traversal completes on its
+first page and retains no session.
+
+Every one of the 27 traversal repetitions reported exactly one snapshot, one
+filter and one sort. Nonterminal first pages allocate 16,624 / 164,080 /
+1,605,872 B at 1k / 10k / 100k and three allocations; continuations measured
+zero allocation. Complete traversal has the same one-time allocation profile as
+session creation rather than multiplying it by page count. The 100k replacement
+is 8,070.3× / 888.0× / 90.3×
+faster at COUNT 10 / 100 / 1000, with 9,998.5× / 999.9× / 100.0× less
+allocation than the rejected baseline.
+
+One 100k session retains a conservative 2,488,959 B estimate. Sixteen retain
+39,823,344 B (37.979 MiB, 29.67% of the 128 MiB cap); constructing those sixteen
+takes 352.851 ms in aggregate and allocates 24.502 MiB transiently. Completion
+and exact-30-second expiry released the full estimate with zero measured
+allocation; the slowest cleanup repetition was 1.140 µs.
+
+The contention harness alternated baseline-first and load-first arms, completed
+eight initial captures in every loaded arm, and collected 712,125–921,557
+samples per arm. Recorded GET p50/p95/p99 was 42/84/84 ns and SET was
+83/125/125 ns in both baseline and load arms for every COUNT. This is not a
+claim of zero maximum or tail impact: maxima were not recorded, and SET sample
+throughput under continuous capture load was 5.9–6.4% lower while GET stayed
+within ±0.5%. The accepted scope is bounded interactive browsing at the
+measured 100k-key scale, not unbounded sessions or a server-wide latency SLA.
+
+The replacement passed its gate: worst 100k first page/traversal stayed below
+25 ms, worst snapshot lock hold was 1.438 ms, retained memory remained below the
+hard cap, and the one-capture/filter/sort traversal invariant held. No maintained
+ordered index was justified or added.
 
 ## Results
 

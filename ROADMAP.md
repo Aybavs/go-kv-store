@@ -55,12 +55,21 @@ invisible in the profile.
 - [x] Release binaries for linux and darwin on amd64 and arm64, with checksums
       and instructions for verifying a download
 
+## v1.1 — Key discovery
+
+- [x] `KEYS`, `SCAN`, and `DBSIZE` over logically live keys
+- [x] Bounded, expiring key-name snapshot sessions with opaque single-use
+      cursors; no maintained ordered index and no server-side value snapshots
+- [x] Complete-traversal and concurrent GET/SET benchmark gates at 1k, 10k, and
+      100k keys
+- [x] Recursive RESP2 client guidance for the nested `SCAN` reply
+
 From 1.0 the scope below is permanent rather than a milestone artefact: these
 are decisions about what this program is, not work that is outstanding.
 
 ## Explicit non-goals
 
-Replication · clustering · Pub/Sub · transactions · List/Hash/Set types ·
+Replication · clustering · Pub/Sub · keyspace notifications · transactions · List/Hash/Set types ·
 snapshot persistence · AOF compaction · authentication · TLS · eviction
 policies · `MSET` (it cannot be expressed as one canonical AOF record without
 extending the record model)

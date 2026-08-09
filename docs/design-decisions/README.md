@@ -18,3 +18,4 @@ The documents that describe the current state are `README.md` and everything in
 | [0005](0005-model-a-durability.md) | Memory becomes visible before the durability acknowledgement |
 | [0006](0006-flush-when-the-reader-blocks.md) | Flush a reply when the reader is about to block |
 | [0007](0007-what-v1-stabilises.md) | What v1.0 stabilises, and what it does not |
+| [0008](0008-bounded-snapshot-scan-sessions.md) | Bound SCAN with expiring key-name snapshot sessions |

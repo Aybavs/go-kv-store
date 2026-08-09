@@ -9,10 +9,22 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Added
 
 - `docs/client-guide.md`, for writing a client or a user interface against this
-  server. It leads with what the server cannot do — there is no key enumeration,
-  no change notification and no introspection — because that decides more about
-  an application than anything it can do. Every byte sequence in it was captured
-  from a running server, and every behavioural claim was checked against one
+  server. It leads with the discovery, notification and introspection boundaries
+  because those decide more about an application than individual commands.
+- `KEYS`, `SCAN`, and `DBSIZE`. `SCAN` captures matching live key names once and
+  pages them through bounded, 30-second snapshot sessions. Cursors are opaque,
+  decimal and single-use; they are invalid after consumption, completion,
+  expiry, or restart.
+- ADR-0008 records why the measured stateless snapshot/sort baseline was
+  rejected, why a maintained index was not added, and why bounded key-name
+  snapshot sessions passed the replacement benchmark gate.
+
+### Compatibility
+
+- The existing 1.x promise is unchanged: documented commands and reply shapes
+  remain protected. A minor release may add commands without making older
+  documented commands unstable. AOF format version 1 is unchanged, and the new
+  discovery commands never append records or wait for durability.
 
 ## [1.0.1] - 2026-08-09
 

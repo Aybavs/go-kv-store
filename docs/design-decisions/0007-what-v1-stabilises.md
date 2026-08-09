@@ -26,7 +26,7 @@ A `1.x` release is compatible with every other `1.x` in these respects:
 
 | Covered | Why |
 |---|---|
-| The command set in `docs/protocol.md` and the **shape** of each reply | This is what a client program is written against. A `GET` that started replying with an array would break every caller |
+| Every command already listed in `docs/protocol.md` and the **shape** of its reply | This is what a client program is written against. A `GET` that started replying with an array would break every caller. A minor release may add a command; it may not remove or reshape an existing documented one |
 | Error **classes**, as enumerated in `docs/protocol.md` | A client can branch on "this was a wrong-arity error". The enumeration is the contract |
 | Flag names and their **defaults** | See below — a default is behaviour nobody typed |
 | Append-only file **format version 1** | A file written by any `1.x` is readable by any other `1.x`. Data outlives the process that wrote it |
@@ -65,6 +65,12 @@ whose job is to fail when the promise is about to be broken:
 The remaining two are already covered by suites that exist: reply shapes by the
 differential conformance tests against real Redis, and exit codes by the
 durability and shutdown suites.
+
+The command promise is monotonic, not frozen at the exact v1.0 list. v1.1 adds
+`KEYS`, `SCAN`, and `DBSIZE`; older documented commands keep their shapes, while
+the new nested `SCAN` shape joins the protected surface from the release that
+introduces it. Treating every addition as a major version would make a stable
+server impossible to extend without making existing clients any safer.
 
 This matters more than the prose. A stability promise that lives only in a
 document is broken by a pull request that looks reasonable, and the test is what

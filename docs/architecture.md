@@ -19,7 +19,7 @@
     └────────┬─────────┘
              ▼
     ┌──────────────────┐
-    │ engine           │  the only RWMutex, mutation ordering, admission gate
+    │ engine           │  data RWMutex, mutation ordering, scan sessions
     └────────┬─────────┘
              ▼
     ┌──────────────────┐
@@ -40,7 +40,10 @@ shared by `server`. Rules that must hold:
    until the next decode.
 2. `command` validates arity, then converts anything it will keep into an owned
    `string`. This is the ownership boundary.
-3. `engine` takes its lock, applies the mutation or read, releases it.
+3. `engine` takes the data lock, applies the mutation or read, releases it.
+   Initial `SCAN` is the notable multi-phase read: only the logically-live name
+   capture is under `RLock`; filtering, sorting, session admission and paging
+   happen afterwards.
 4. The command returns a plain-Go `Reply`; the server encodes it as RESP and
    flushes.
 
@@ -188,12 +191,61 @@ an expired `SET k new PXAT T` must leave `k` gone, not holding `old`.
 ## Concurrency model
 
 One goroutine per connection. All shared state is behind a single
-`sync.RWMutex` in `engine`. Reads take `RLock` and run concurrently; mutations
-take `Lock` and serialise.
+data `sync.RWMutex` in `engine`. Reads take `RLock` and run concurrently;
+mutations take `Lock` and serialise. The scan-session manager has its own plain
+mutex for cursor and retained-memory bookkeeping. The data and session locks
+are never held together, so session paging cannot extend a store lock hold and
+the data path cannot wait while a reply is encoded or written.
 
 This is the simplest model that is demonstrably correct. Sharding is not a
 planned feature — it is a decision to be made against profiling data, if ever.
 See [ADR 0001](design-decisions/0001-storage-concurrency-and-value-representation.md).
+
+## Key discovery
+
+`KEYS`, initial `SCAN`, and `DBSIZE` judge every entry against one captured
+instant while holding the engine data `RLock` (the clock read is skipped where
+no key has a deadline). The store remains passive: it receives that time and
+neither locks nor reads a clock itself.
+
+`KEYS` copies all logically live names, releases the lock, sorts bytewise and
+applies the shared byte-oriented glob matcher. Its deterministic order is an
+implementation convenience, not a protocol guarantee. `DBSIZE` walks the store
+under `RLock` and counts logically live entries without allocating a snapshot;
+raw map length would incorrectly include expired entries awaiting reclamation.
+
+Initial `SCAN` has four phases:
+
+1. copy every logically live key name under the data `RLock` using one captured
+   instant;
+2. release the data lock, then filter the complete snapshot in place with the
+   fixed `MATCH` pattern and sort the retained names bytewise;
+3. take the independent session-manager mutex, enforce the 16-session and
+   128-MiB global bounds, and retain an unfinished snapshot;
+4. return a page and either `0` or a fresh opaque decimal cursor.
+
+Continuations touch only the session manager. They do not read the store,
+recheck liveness, filter, or sort. Every successful nonterminal continuation
+removes its presented cursor and installs a newly generated token for the same
+snapshot, which makes cursors single-use. A changed `MATCH` fails before that
+rotation and therefore does not consume the valid cursor. `COUNT` is page state,
+not session identity, and may change.
+
+The snapshot owns key names but no values. Inserts after capture are absent;
+names deleted or expired after capture may remain; a value can change at any
+time. This avoids adding SET/DEL/expiration invariants to a maintained index.
+Retained memory is estimated conservatively from slice capacity, string headers,
+key bytes, pattern bytes and fixed session overhead, with saturating arithmetic.
+
+Sessions expire after 30 seconds of inactivity. Expiry is lazy: creation and
+continuation calls remove stale sessions while holding only the manager mutex,
+so there is no scan cleanup goroutine. Completion, expiration and server
+shutdown release both the entry and its accounting. Sessions and cursors are
+never written to AOF v1 or recovered; discovery emits no AOF record and waits
+for no durability acknowledgement. A restart begins with no sessions.
+
+[ADR 0008](design-decisions/0008-bounded-snapshot-scan-sessions.md) records the
+rejected per-page snapshot/sort baseline, benchmark gate and alternatives.
 
 ## Ownership
 
@@ -213,6 +265,11 @@ inside the engine's own lock, and signals handlers. A command already executing
 finishes and returns its reply; commands the client had merely buffered are not
 started. Idle clients do not block shutdown: their parked reads are released by
 setting an immediate read deadline.
+
+Outstanding scan sessions are cleared when shutdown completes. If the shutdown
+budget expires while a registered handler is still finishing, the last handler
+performs the same cleanup when it leaves; session data is not intentionally
+kept alive after the server has stopped serving.
 
 The admission gate lives inside the commit lock rather than at the connection
 level, because a connection-level check can be passed immediately before
@@ -264,6 +321,9 @@ Each layer is tested at the level where its property is actually visible.
 | Mutation admission under contention | `engine`, concurrent writers against a drain |
 | Shutdown, limits, deadlines | `server`, over real TCP |
 | Command semantics | `conformance`, differentially against real Redis |
+| Snapshot membership, cursor rotation, limits and cleanup | `engine` discovery/session tests |
+| Nested `SCAN` reply and fragmented/pipelined requests | `server`, over real TCP |
+| Complete traversal and GET/SET impact | `engine` benchmark gate at 1k/10k/100k |
 | Syscalls per command | `server`, counted directly by a wrapped listener |
 | Interactions no scenario list contains | `cmdgen` sequences, run differentially and through recovery |
 
