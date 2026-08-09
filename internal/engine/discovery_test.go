@@ -6,6 +6,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/aybavs/go-kv-store/internal/aof"
 )
 
 func seedDiscovery(t *testing.T, e *Engine, keys ...string) {
@@ -110,6 +112,22 @@ func TestDiscoveryWorksWhileDraining(t *testing.T) {
 	}
 	if got := e.Scan(0, "*", 10); !slices.Equal(got.Keys, []string{"a"}) {
 		t.Fatalf("Scan during drain = %+v", got)
+	}
+}
+
+func TestDiscoveryDoesNotAppendAOFRecords(t *testing.T) {
+	f := &recordingFile{}
+	e, _, _ := newLoggedEngine(t, f, aof.EverySec)
+	if err := e.Set("a", "v", NoExpiry()); err != nil {
+		t.Fatal(err)
+	}
+	before := len(f.records(t))
+	_ = e.Keys("*")
+	_ = e.Scan(0, "*", 10)
+	_ = e.DBSize()
+	after := len(f.records(t))
+	if after != before {
+		t.Fatalf("discovery appended %d records, want 0", after-before)
 	}
 }
 
