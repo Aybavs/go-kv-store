@@ -77,11 +77,12 @@ func matchClass(pattern string, at int, value byte) (next int, matched bool) {
 			matched = matched || pattern[i] == value
 			i++
 		case i+2 < len(pattern) && pattern[i+1] == '-':
-			lo, hi := pattern[i], pattern[i+2]
+			lo, hi := int8(pattern[i]), int8(pattern[i+2])
 			if lo > hi {
 				lo, hi = hi, lo
 			}
-			matched = matched || (value >= lo && value <= hi)
+			candidate := int8(value)
+			matched = matched || (candidate >= lo && candidate <= hi)
 			i += 3
 		default:
 			matched = matched || pattern[i] == value
