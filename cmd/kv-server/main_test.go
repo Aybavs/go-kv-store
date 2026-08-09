@@ -2,7 +2,7 @@ package main
 
 import (
 	"flag"
-	"sort"
+	"strings"
 	"testing"
 )
 
@@ -63,6 +63,11 @@ func TestFlagSurfaceIsStable(t *testing.T) {
 				"is allowed, but it has to be written down here and in docs", name, def)
 		}
 	}
+
+	// Both directions are needed and both are here: the first loop catches a
+	// promised flag that is no longer registered, the second catches a
+	// registered flag nobody promised. A third test that only counted them
+	// would add nothing, which is why there is not one.
 }
 
 // The help text is the only place a user learns that our everysec is not
@@ -77,36 +82,10 @@ func TestAppendfsyncHelpStatesTheRedisDifference(t *testing.T) {
 		t.Fatal("-appendfsync is missing")
 	}
 	for _, want := range []string{"Redis", "before writing"} {
-		if !contains(f.Usage, want) {
+		if !strings.Contains(f.Usage, want) {
 			t.Errorf("the -appendfsync help does not mention %q; the difference from Redis's "+
 				"everysec has to be stated where the flag is documented, not only in docs/:\n%s",
 				want, f.Usage)
 		}
 	}
-}
-
-func contains(haystack, needle string) bool {
-	for i := 0; i+len(needle) <= len(haystack); i++ {
-		if haystack[i:i+len(needle)] == needle {
-			return true
-		}
-	}
-	return false
-}
-
-// Guards the table above against the one way it could be wrong while looking
-// right: listing flags that are not registered would still pass every check in
-// TestFlagSurfaceIsStable if the extra names were also absent from got.
-func TestEveryPromisedFlagIsRegistered(t *testing.T) {
-	fs := flag.NewFlagSet("kv-server", flag.ContinueOnError)
-	registerFlags(fs)
-
-	var names []string
-	fs.VisitAll(func(f *flag.Flag) { names = append(names, f.Name) })
-	sort.Strings(names)
-
-	if len(names) == 0 {
-		t.Fatal("registerFlags bound nothing")
-	}
-	t.Logf("flag surface (%d): %v", len(names), names)
 }

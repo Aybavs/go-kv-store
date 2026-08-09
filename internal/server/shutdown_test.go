@@ -229,14 +229,18 @@ func TestShutdownTimeoutIsReported(t *testing.T) {
 		_, _ = conn.Read(buf) // returns only when Close releases it
 	})
 
-	if err := srv.gracefulShutdown(); !errors.Is(err, ErrShutdownTimeout) {
+	err := srv.gracefulShutdown()
+	if !errors.Is(err, ErrShutdownTimeout) {
 		t.Fatalf("gracefulShutdown = %v, want ErrShutdownTimeout", err)
 	}
 
-	// The exit code depends on this: a shutdown that could not drain must not
-	// look like one that did.
-	if errors.Is(ErrShutdownTimeout, nil) {
-		t.Fatal("ErrShutdownTimeout must be a non-nil error")
+	// The exit code is what this decides, and main turns a non-nil return into
+	// a non-zero exit. Asserting that directly, because an earlier version of
+	// this test wrote errors.Is(ErrShutdownTimeout, nil) here, which compares a
+	// non-nil sentinel against nil and is therefore always false: a line that
+	// looked like a check and was not.
+	if err == nil {
+		t.Fatal("a shutdown that could not drain returned nil, which exits 0")
 	}
 }
 

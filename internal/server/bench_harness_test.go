@@ -131,10 +131,8 @@ func setWorkload(name string, conns, pipeline, commands int, policy string) work
 type result struct {
 	throughput    float64 // commands per second
 	p50, p95, p99 time.Duration
-	max           time.Duration
 	readsPerCmd   float64
 	writesPerCmd  float64
-	bytesPerCmd   float64
 }
 
 // run executes one repetition and returns its result.
@@ -224,10 +222,8 @@ func run(t testing.TB, w workload) result {
 		p50:          quantile(all, 0.50),
 		p95:          quantile(all, 0.95),
 		p99:          quantile(all, 0.99),
-		max:          quantile(all, 1.0),
 		readsPerCmd:  float64(counter.reads.Load()) / done,
 		writesPerCmd: float64(counter.writes.Load()) / done,
-		bytesPerCmd:  float64(counter.bytesWritten.Load()) / done,
 	}
 }
 
