@@ -1,6 +1,7 @@
 package server
 
 import (
+	"io"
 	"testing"
 )
 
@@ -26,6 +27,47 @@ func TestPipelinedSingleWrite(t *testing.T) {
 		if got := c.readReply(t); got != w {
 			t.Fatalf("reply %d: got %q, want %q", i, got, w)
 		}
+	}
+}
+
+// TestFragmentedScanAndPipelinedReplyAlignment covers two independent TCP
+// delivery shapes: one-byte request fragmentation and a mixed reply pipeline.
+func TestFragmentedScanAndPipelinedReplyAlignment(t *testing.T) {
+	addr, _ := startServer(t, nil)
+	c := dial(t, addr)
+	c.send(t, "SET", "a", "v")
+	if got := c.readReply(t); got != "+OK" {
+		t.Fatalf("SET = %q", got)
+	}
+
+	frame := []byte("*6\r\n$4\r\nSCAN\r\n$1\r\n0\r\n$5\r\nMATCH\r\n$1\r\n*\r\n$5\r\nCOUNT\r\n$2\r\n10\r\n")
+	for _, b := range frame {
+		if _, err := c.conn.Write([]byte{b}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	wantScan := "*2\r\n$1\r\n0\r\n*1\r\n$1\r\na\r\n"
+	got := make([]byte, len(wantScan))
+	if _, err := io.ReadFull(c.br, got); err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != wantScan {
+		t.Fatalf("fragmented SCAN = %q, want %q", got, wantScan)
+	}
+
+	payload := "*2\r\n$4\r\nSCAN\r\n$1\r\n0\r\n" +
+		"*1\r\n$6\r\nDBSIZE\r\n" +
+		"*1\r\n$4\r\nPING\r\n"
+	if _, err := c.conn.Write([]byte(payload)); err != nil {
+		t.Fatal(err)
+	}
+	want := "*2\r\n$1\r\n0\r\n*1\r\n$1\r\na\r\n:1\r\n+PONG\r\n"
+	all := make([]byte, len(want))
+	if _, err := io.ReadFull(c.br, all); err != nil {
+		t.Fatal(err)
+	}
+	if string(all) != want {
+		t.Fatalf("pipeline = %q, want %q", all, want)
 	}
 }
 

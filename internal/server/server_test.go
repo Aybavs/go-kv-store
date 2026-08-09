@@ -364,3 +364,41 @@ func TestServerMGetArrayFraming(t *testing.T) {
 		t.Fatalf("PING after MGET got %q; the array left the stream misaligned", got)
 	}
 }
+
+// TestServerScanNestedArrayFraming pins SCAN's nested RESP2 reply and verifies
+// that consuming the whole reply leaves the connection at the next boundary.
+func TestServerScanNestedArrayFraming(t *testing.T) {
+	addr, _ := startServer(t, nil)
+	c := dial(t, addr)
+	for _, key := range []string{"a", "b"} {
+		c.send(t, "SET", key, "v")
+		if got := c.readReply(t); got != "+OK" {
+			t.Fatalf("SET %s = %q", key, got)
+		}
+	}
+
+	c.send(t, "SCAN", "0", "COUNT", "1")
+	want := "*2\r\n$1\r\n1\r\n*1\r\n$1\r\na\r\n"
+	got := make([]byte, len(want))
+	if _, err := io.ReadFull(c.br, got); err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != want {
+		t.Fatalf("first SCAN = %q, want %q", got, want)
+	}
+
+	c.send(t, "SCAN", "1", "COUNT", "1")
+	want = "*2\r\n$1\r\n0\r\n*1\r\n$1\r\nb\r\n"
+	got = make([]byte, len(want))
+	if _, err := io.ReadFull(c.br, got); err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != want {
+		t.Fatalf("second SCAN = %q, want %q", got, want)
+	}
+
+	c.send(t, "PING")
+	if got := c.readReply(t); got != "+PONG" {
+		t.Fatalf("PING after SCAN = %q; stream is misaligned", got)
+	}
+}

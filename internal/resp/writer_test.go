@@ -144,6 +144,35 @@ func TestWriterArrayFraming(t *testing.T) {
 	}
 }
 
+// TestWriterNestedArrayFraming pins the recursive RESP2 shape used by SCAN:
+// the cursor is a bulk string and the key page is an inner array of bulks.
+func TestWriterNestedArrayFraming(t *testing.T) {
+	var buf bytes.Buffer
+	w := NewWriter(&buf)
+	if err := w.WriteArrayHeader(2); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.WriteBulk("1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.WriteArrayHeader(2); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.WriteBulk("a"); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.WriteBulk("b"); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	want := "*2\r\n$1\r\n1\r\n*2\r\n$1\r\na\r\n$1\r\nb\r\n"
+	if got := buf.String(); got != want {
+		t.Fatalf("nested array = %q, want %q", got, want)
+	}
+}
+
 // TestWriterDecoderRoundTrip encodes an array of bulk strings and reads it back
 // through this package's own decoder. This is the property the append-only file
 // will rely on later: records written by the encoder must be parseable by the
