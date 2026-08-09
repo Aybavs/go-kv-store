@@ -6,7 +6,6 @@ import (
 	"bufio"
 	"errors"
 	"io"
-	"slices"
 )
 
 // Limits bound what the decoder will accept from an untrusted peer. The first
@@ -174,7 +173,7 @@ func (r *Reader) readBulk() error {
 			chunk = maxPreallocation
 		}
 		at := len(r.buf)
-		r.buf = slices.Grow(r.buf, chunk)
+		r.growBuf(at + chunk)
 		r.buf = r.buf[:at+chunk]
 		if _, err := io.ReadFull(r.br, r.buf[at:at+chunk]); err != nil {
 			return bulkReadErr(err)
@@ -187,6 +186,45 @@ func (r *Reader) readBulk() error {
 	r.buf = r.buf[:start+ln] // drop the trailing CRLF
 	r.offsets = append(r.offsets, [2]int{start, start + ln})
 	return nil
+}
+
+// growBuf makes room for need bytes, doubling as slices.Grow would but never
+// past MaxCommandBytes.
+//
+// The cap is about peak memory, not about the limit itself — that is already
+// enforced against the declared length before any payload is read. During a
+// grow both arrays are live while the copy runs, so an unbounded doubling makes
+// the peak the old array plus twice the limit: measured at v0.1.1, a 128 MiB
+// limit peaked at 417 MB resident, about three times the number the operator
+// configured.
+//
+// A new array capped at the limit cannot be the larger of the two, so the peak
+// becomes old plus limit instead. It costs one extra copy in the case where the
+// doubling would have overshot, on a path that is already reading tens of
+// megabytes off a socket.
+func (r *Reader) growBuf(need int) {
+	if cap(r.buf) >= need {
+		return
+	}
+	size := 2 * cap(r.buf)
+	if size < need {
+		size = need
+	}
+	if limit := r.limits.MaxCommandBytes; limit > 0 && size > limit {
+		// max(limit, need), not limit. The declared payload length is checked
+		// against the limit before any byte is read, but the CRLF that
+		// terminates it is read into the same buffer, so the room actually
+		// needed can exceed the limit by those two bytes. Capping to the limit
+		// flatly produced a slice shorter than the caller was about to index —
+		// caught by TestReadCommandTotalSizeLimit rather than by reading.
+		size = limit
+		if need > size {
+			size = need
+		}
+	}
+	grown := make([]byte, len(r.buf), size)
+	copy(grown, r.buf)
+	r.buf = grown
 }
 
 // bulkReadErr maps a mid-frame EOF to a protocol error: a clean EOF is only

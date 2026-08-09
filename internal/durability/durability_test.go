@@ -105,6 +105,23 @@ func start(t *testing.T, bin, aofPath, policy string) *instance {
 		t.Fatalf("start: %v", err)
 	}
 
+	// Registered the moment the process exists, not left to the caller.
+	//
+	// Every start here is paired with a kill on the happy path, but the paths
+	// in between are not all happy: verifyRecovered and dial both call
+	// t.Fatalf, and a test that aborts there never reaches its kill. The
+	// process then outlives the run holding a temp directory that has already
+	// been removed, which is exactly how six of them were once found alive on
+	// a development machine.
+	//
+	// kill is idempotent, so this costs nothing on the ordinary path. It cannot
+	// help if the test binary is itself killed — an orphan is the operating
+	// system's business then, not the test's.
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+	})
+
 	addr := make(chan string, 1)
 	fail := make(chan string, 1)
 	torn := &atomic.Bool{}
@@ -142,9 +159,13 @@ func start(t *testing.T, bin, aofPath, policy string) *instance {
 
 // kill is a SIGKILL, deliberately. A graceful shutdown would flush and sync,
 // which is the case this test is not about.
+//
+// Killing an already-dead process is not an error here: start registers the
+// same teardown with t.Cleanup, so both may run and the second one has nothing
+// left to do.
 func (in *instance) kill(t *testing.T) {
 	t.Helper()
-	if err := in.cmd.Process.Kill(); err != nil {
+	if err := in.cmd.Process.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) {
 		t.Fatalf("kill: %v", err)
 	}
 	_ = in.cmd.Wait()

@@ -559,3 +559,43 @@ func TestIncompleteFrameIsDistinguishable(t *testing.T) {
 		}
 	})
 }
+
+// TestBufferNeverGrowsPastTheCommandLimit pins the property that bounds peak
+// memory rather than the limit itself.
+//
+// The limit is enforced against the declared length before any payload is read,
+// so a request cannot exceed it. What that check does not bound is the transient
+// during a grow: both arrays are live while the copy runs.
+//
+// The overshoot needs constructing, not approximating. It happens at exactly one
+// place: a payload the size of the whole limit fills the buffer to capacity, and
+// then the CRLF terminating it asks for two bytes more. An unbounded doubling
+// answers that with an array twice the limit, so the peak becomes the limit plus
+// twice the limit — the three times SECURITY.md measured. A first version of
+// this test used a payload comfortably under the limit and passed with the cap
+// removed, because nothing ever overshot.
+func TestBufferNeverGrowsPastTheCommandLimit(t *testing.T) {
+	const limit = 256 << 10
+
+	limits := DefaultLimits()
+	limits.MaxCommandBytes = limit
+
+	// One argument of exactly the limit, so the last two bytes read are the
+	// CRLF and the buffer is already full when they are asked for.
+	payload := strings.Repeat("x", limit)
+	frame := "*1\r\n$" + strconv.Itoa(len(payload)) + "\r\n" + payload + "\r\n"
+
+	r := NewReader(strings.NewReader(frame), limits)
+	args, err := r.ReadCommand()
+	if err != nil {
+		t.Fatalf("ReadCommand: %v", err)
+	}
+	if len(args) != 1 || len(args[0]) != limit {
+		t.Fatalf("the command did not survive the growth path")
+	}
+	if got := cap(r.buf); got > limit+2 {
+		t.Fatalf("buffer capacity %d exceeds the %d-byte limit by more than the CRLF; "+
+			"a doubling overshot, which is what makes peak memory three times the "+
+			"configured value", got, limit)
+	}
+}

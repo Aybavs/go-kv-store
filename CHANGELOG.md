@@ -6,6 +6,33 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- The decode buffer no longer grows past `-max-command-bytes`. Doubling used to
+  overshoot the limit on the last growth of a maximum-sized command, so peak
+  memory was the limit plus twice the limit. Measured filling a 128 MiB limit,
+  five interleaved pairs: peak RSS 648 MB before, 519 MB after
+- GitHub Actions moved to their current majors, clearing a Node 20 deprecation
+  notice that had annotated every run since v0.1.0
+
+### Fixed
+
+- The durability suite registers its server teardown where the process is
+  created, so a `t.Fatalf` between starting a server and killing it can no
+  longer leave one behind
+
+### Documentation
+
+- Two questions `docs/benchmarks.md` had left open are now measured and closed.
+  The v0.5.0 throughput difference at fifty connections without pipelining does
+  not exist — fifteen repetitions put the medians within 1.2%, and the arm that
+  looked slower simply has a 63% spread against the other's 16%. Deferring the
+  flush turns out to make throughput four times more predictable at that
+  concurrency, which is a result the medians were hiding
+- The mixed-workload observation carried since v0.2 is no longer a hypothesis.
+  Sweeping the write fraction shows throughput is not monotonic in it: fastest
+  at roughly one write in ten, slower with none, and collapsing at one in two
+
 ## [0.5.0] - 2026-08-09
 
 Performance. The measurement came first, in its own change, so that the
