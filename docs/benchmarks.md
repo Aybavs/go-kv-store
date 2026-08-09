@@ -183,12 +183,24 @@ mechanism and the alternatives it rules out.
 
 One and ten connections are flat and stable enough to say so.
 
-**Fifty connections is unsettled, and is recorded as unsettled.** Three
-interleaved runs gave −6.5%, −4.0% and +0.2%. The before arm's own spread was
-9–13% in every one of them, which is what makes its median unreliable; measured
-on its own, with only that workload in the process, the two arms matched
-(121 229 against 121 448). The honest statement is that this method cannot
-separate a difference of this size at that concurrency — not that there is none.
+**Fifty connections was reported as unsettled at v0.5.0 and has since been
+settled by measuring it properly.** Three interleaved runs had given −6.5%,
+−4.0% and +0.2%, with the before arm's spread at 9–13% each time. Re-run with
+that workload alone and fifteen repetitions:
+
+| | cmd/s | spread |
+|---|---|---|
+| before | 107 084 | **63.0%** |
+| after | 108 336 | 16.4% |
+
+The medians are within 1.2% of each other, so there is no difference to explain.
+The earlier deltas were the noisy arm's median moving, not the change.
+
+The spread is the actual result here, and it points the other way from the
+worry: deferring the flush makes throughput at this concurrency **four times
+more predictable**. Flushing inside the read path removes a wakeup per command
+from the scheduler's work, and that shows up in the variance long before it
+shows up in the median.
 
 ### Latency, per batch
 
@@ -374,12 +386,38 @@ this table describes a real property of `sync.RWMutex` that a real request never
 gets near. ADR-0001 reserved sharding for the case where profiling justified it;
 the profiling exists now and does not.
 
-One observation recorded rather than explained away: the mixed workload is
-*faster* than the pure-read one above two cores, which is counter-intuitive when
-it holds an exclusive lock a tenth of the time. A plausible reason is that a
-writer parks readers instead of leaving them contending on the shared counter,
-but that is a hypothesis and it has still not been measured. It survives into
-v1.0 as an open question, not as an explanation.
+### The mixed workload really is faster, and it is no longer a hypothesis
+
+Since v0.2 this file has carried an observation it could not explain: the mixed
+workload is *faster* than the pure-read one above two cores, which is
+counter-intuitive when it takes an exclusive lock a tenth of the time. The
+suggested reason — a writer parks readers instead of leaving them contending on
+the shared reader counter — was labelled a hypothesis because nothing had varied
+the one quantity that would test it.
+
+Sweeping the write fraction at ten cores, five repetitions each, medians:
+
+| writes | ns/op |
+|---|---|
+| none | 105.9 |
+| 1 in 1000 | 124.2 |
+| 1 in 100 | 109.6 |
+| 1 in 10 | **77.6** |
+| 1 in 4 | 79.1 |
+| 1 in 2 | 136.6 |
+
+**Throughput is not monotonic in the write fraction.** It improves as writers are
+added, is fastest at roughly one write in ten, and collapses once exclusive
+locking dominates at one in two. Pure reads are slower than a workload with 10%
+writes. That is the shape the parking explanation predicts and the shape a
+"writes are pure overhead" model cannot produce, so the hypothesis is supported
+rather than merely plausible.
+
+One point does not fit the smooth story: one write in a thousand measured slower
+than pure reads, and slower than one in a hundred. Recorded rather than smoothed
+over — a single writer that rarely appears may be enough to disturb the readers
+without being frequent enough to keep them parked, but that is a guess and this
+file has already spent one version calling a guess a hypothesis.
 
 ## A measurement error in the benchmarks themselves
 
