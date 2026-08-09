@@ -54,6 +54,14 @@ type Engine struct {
 	mu                 sync.RWMutex
 	store              *store.Store
 	acceptingMutations bool
+	scanSessions       *scanSessionManager
+
+	// These helpers are fields so tests can count the snapshot phases without
+	// coupling assertions to source text. Production always installs the
+	// package helpers below.
+	scanLiveKeys func(time.Time) []string
+	scanFilter   func([]string, string) []string
+	scanSort     func([]string)
 
 	onFatal func(error)
 
@@ -192,12 +200,17 @@ func NewWithClock(onFatal func(error), now func() time.Time) *Engine {
 	if now == nil {
 		panic("engine: New requires a non-nil clock")
 	}
-	return &Engine{
+	e := &Engine{
 		store:              store.New(),
 		acceptingMutations: true,
 		onFatal:            onFatal,
 		now:                now,
 	}
+	e.scanSessions = newScanSessionManager(now, nil, defaultScanSessionLimits())
+	e.scanLiveKeys = e.store.LiveKeys
+	e.scanFilter = filterSnapshot
+	e.scanSort = sortSnapshot
+	return e
 }
 
 // readNow is the instant expiry is judged against, and skips the clock when no

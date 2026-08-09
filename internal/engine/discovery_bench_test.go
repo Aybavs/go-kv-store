@@ -74,7 +74,7 @@ func BenchmarkEngineScanPage(b *testing.B) {
 			b.Run(strconv.Itoa(size)+"/count-"+strconv.FormatUint(count, 10), func(b *testing.B) {
 				b.ReportAllocs()
 				for i := 0; i < b.N; i++ {
-					_ = e.Scan(0, "key:*", count)
+					_, _ = e.Scan(ScanRequest{Pattern: "key:*", PatternSet: true, Count: count})
 				}
 			})
 		}
@@ -93,7 +93,11 @@ func BenchmarkEngineScanTraversal(b *testing.B) {
 				for i := 0; i < b.N; i++ {
 					cursor := uint64(0)
 					for first := true; first || cursor != 0; first = false {
-						cursor = e.Scan(cursor, "key:*", count).Cursor
+						page, err := e.Scan(ScanRequest{Cursor: cursor, Pattern: "key:*", PatternSet: true, Count: count})
+						if err != nil {
+							b.Fatal(err)
+						}
+						cursor = page.Cursor
 					}
 				}
 			})
@@ -126,7 +130,11 @@ func measureDiscoveryLatency(t *testing.T, e *Engine, count uint64, scan bool, s
 			for {
 				cursor := uint64(0)
 				for first := true; first || cursor != 0; first = false {
-					page := e.Scan(cursor, "*", count)
+					page, err := e.Scan(ScanRequest{Cursor: cursor, Count: count})
+					if err != nil {
+						t.Errorf("Scan: %v", err)
+						return
+					}
 					once.Do(func() { close(started) })
 					cursor = page.Cursor
 					select {

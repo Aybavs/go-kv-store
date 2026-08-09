@@ -2,6 +2,7 @@ package server
 
 import (
 	"io"
+	"strings"
 	"testing"
 )
 
@@ -68,6 +69,54 @@ func TestFragmentedScanAndPipelinedReplyAlignment(t *testing.T) {
 	}
 	if string(all) != want {
 		t.Fatalf("pipeline = %q, want %q", all, want)
+	}
+}
+
+func TestScanSessionOwnsMatchAcrossParserBufferReuse(t *testing.T) {
+	addr, _ := startServer(t, nil)
+	c := dial(t, addr)
+	for _, key := range []string{"prefix:a", "prefix:b"} {
+		c.send(t, "SET", key, "v")
+		if got := c.readReply(t); got != "+OK" {
+			t.Fatalf("SET %s = %q", key, got)
+		}
+	}
+
+	c.send(t, "SCAN", "0", "MATCH", "prefix:*", "COUNT", "1")
+	if got := c.readReply(t); got != "*2" {
+		t.Fatalf("initial SCAN outer header = %q, want *2", got)
+	}
+	cursor := c.readBulkReply(t)
+	if cursor == "0" {
+		t.Fatal("initial SCAN did not retain a session")
+	}
+	if got := c.readReply(t); got != "*1" {
+		t.Fatalf("initial SCAN key array = %q, want *1", got)
+	}
+	if got := c.readBulkReply(t); got != "prefix:a" {
+		t.Fatalf("initial SCAN key = %q, want prefix:a", got)
+	}
+
+	for i := 0; i < 200; i++ {
+		payload := strings.Repeat(string(rune('a'+i%26)), 64) + itoa(i)
+		c.send(t, "PING", payload)
+		if got := c.readBulkReply(t); got != payload {
+			t.Fatalf("PING %d = %q, want parser-buffer overwrite payload", i, got)
+		}
+	}
+
+	c.send(t, "SCAN", cursor, "MATCH", "prefix:*", "COUNT", "1")
+	if got := c.readReply(t); got != "*2" {
+		t.Fatalf("continued SCAN outer header = %q, want *2", got)
+	}
+	if got := c.readBulkReply(t); got != "0" {
+		t.Fatalf("continued SCAN cursor = %q, want 0", got)
+	}
+	if got := c.readReply(t); got != "*1" {
+		t.Fatalf("continued SCAN key array = %q, want *1", got)
+	}
+	if got := c.readBulkReply(t); got != "prefix:b" {
+		t.Fatalf("continued SCAN key = %q, want prefix:b", got)
 	}
 }
 

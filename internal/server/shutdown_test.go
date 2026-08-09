@@ -3,6 +3,7 @@ package server
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -16,6 +17,112 @@ import (
 	"github.com/aybavs/go-kv-store/internal/engine"
 	"github.com/aybavs/go-kv-store/internal/resp"
 )
+
+func fillDefaultScanSessionLimit(e *engine.Engine) ([]uint64, error) {
+	tokens := make([]uint64, 0, 16)
+	for i := 0; i < 16; i++ {
+		page, err := e.Scan(engine.ScanRequest{Count: 1})
+		if err != nil {
+			return nil, fmt.Errorf("start session %d: %w", i, err)
+		}
+		if page.Cursor == 0 {
+			return nil, fmt.Errorf("start session %d returned terminal cursor", i)
+		}
+		tokens = append(tokens, page.Cursor)
+	}
+	if _, err := e.Scan(engine.ScanRequest{Count: 1}); !errors.Is(err, engine.ErrScanSessionLimit) {
+		return nil, fmt.Errorf("session 17 error = %v, want %v", err, engine.ErrScanSessionLimit)
+	}
+	return tokens, nil
+}
+
+func TestShutdownClearsSessionsCreatedByHandlersBeforeTheyStop(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		shutdown func(*Server, *Supervisor) error
+		wantErr  bool
+	}{
+		{
+			name: "graceful",
+			shutdown: func(s *Server, _ *Supervisor) error {
+				return s.gracefulShutdown()
+			},
+		},
+		{
+			name: "fatal",
+			shutdown: func(s *Server, sup *Supervisor) error {
+				cause := errors.New("fatal scan cleanup test")
+				sup.Fatal(cause)
+				return s.fatalShutdown(cause)
+			},
+			wantErr: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, sup, _ := newBoundServer(t)
+			for i := 0; i < 17; i++ {
+				if err := srv.eng.Set(fmt.Sprintf("scan:%02d", i), "v", engine.NoExpiry()); err != nil {
+					t.Fatalf("seed scan key %d: %v", i, err)
+				}
+			}
+			handlerStarted := make(chan struct{})
+			allowSessionCreation := make(chan struct{})
+			retained := make(chan struct {
+				tokens []uint64
+				err    error
+			}, 1)
+			client, conn := net.Pipe()
+			defer client.Close()
+			register(srv, conn, func() {
+				<-srv.draining
+				close(handlerStarted)
+				<-allowSessionCreation
+				tokens, err := fillDefaultScanSessionLimit(srv.eng)
+				retained <- struct {
+					tokens []uint64
+					err    error
+				}{tokens: tokens, err: err}
+			})
+
+			shutdownDone := make(chan error, 1)
+			go func() { shutdownDone <- tc.shutdown(srv, sup) }()
+			<-handlerStarted
+			returnedBeforeHandler := false
+			var shutdownErr error
+			select {
+			case shutdownErr = <-shutdownDone:
+				returnedBeforeHandler = true
+			default:
+			}
+			close(allowSessionCreation)
+			created := <-retained
+			if created.err != nil {
+				t.Fatalf("handler session setup: %v", created.err)
+			}
+			if !returnedBeforeHandler {
+				shutdownErr = <-shutdownDone
+			}
+			if returnedBeforeHandler {
+				t.Error("shutdown returned before the registered handler stopped")
+			}
+			if tc.wantErr != (shutdownErr != nil) {
+				t.Errorf("shutdown error = %v, wantErr %v", shutdownErr, tc.wantErr)
+			}
+
+			for _, cursor := range created.tokens {
+				if _, err := srv.eng.Scan(engine.ScanRequest{Cursor: cursor, Count: 1}); !errors.Is(err, engine.ErrInvalidCursor) {
+					t.Fatalf("cursor %d after shutdown error = %v, want %v", cursor, err, engine.ErrInvalidCursor)
+				}
+			}
+			for i := 0; i < 16; i++ {
+				page, err := srv.eng.Scan(engine.ScanRequest{Count: 1})
+				if err != nil || page.Cursor == 0 {
+					t.Fatalf("replacement session %d = (%+v, %v), want released capacity", i, page, err)
+				}
+			}
+		})
+	}
+}
 
 // The six shutdown behaviours the design spec enumerates and the suite did not
 // cover. Two are error paths nothing had executed: ErrShutdownTimeout, and the

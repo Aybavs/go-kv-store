@@ -101,6 +101,26 @@ func TestErrorTextThatDispatchCannotReach(t *testing.T) {
 	}
 }
 
+func TestScanEngineErrorsUsePublicClassesAndInternalFallback(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+		want string
+	}{
+		{"invalid cursor", engine.ErrInvalidCursor, "ERR invalid cursor"},
+		{"session limit", engine.ErrScanSessionLimit, "ERR scan session limit reached"},
+		{"MATCH changed", engine.ErrScanMatchChanged, "ERR scan MATCH cannot change during iteration"},
+		{"unexpected manager error", errors.New("token source failed"), "ERR internal error"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := scanError(tc.err)
+			if got.Kind != ReplyError || got.Str != tc.want {
+				t.Fatalf("scanError(%v) = %+v, want error %q", tc.err, got, tc.want)
+			}
+		})
+	}
+}
+
 // mutationErrorTexts returns every string mutationError can produce, by asking
 // it rather than by listing them again. The nil case stands in for "an error
 // mutationError does not recognise", which is what its default arm is for.

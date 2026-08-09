@@ -519,6 +519,53 @@ func collectScan(t *testing.T, conn redis.Conn, pattern string, count int) map[s
 	return out
 }
 
+func TestOurScanRejectsUnknownConsumedAndCompletedNumericTokens(t *testing.T) {
+	conn := dial(t, startOurServer(t))
+	if _, err := conn.Do("SCAN", "424242"); err == nil || err.Error() != "ERR invalid cursor" {
+		t.Fatalf("unknown numeric cursor error = %v, want ERR invalid cursor", err)
+	}
+	for _, key := range []string{"a", "b", "c"} {
+		if _, err := conn.Do("SET", key, "v"); err != nil {
+			t.Fatalf("SET %s: %v", key, err)
+		}
+	}
+
+	reply, err := redis.Values(conn.Do("SCAN", "0", "COUNT", "1"))
+	if err != nil {
+		t.Fatalf("initial SCAN: %v", err)
+	}
+	var firstCursor string
+	var firstKeys []string
+	if _, err := redis.Scan(reply, &firstCursor, &firstKeys); err != nil {
+		t.Fatalf("decode initial SCAN: %v", err)
+	}
+	if firstCursor == "0" || len(firstKeys) != 1 {
+		t.Fatalf("initial SCAN = cursor %q keys %q, want retained one-key page", firstCursor, firstKeys)
+	}
+
+	reply, err = redis.Values(conn.Do("SCAN", firstCursor, "COUNT", "1"))
+	if err != nil {
+		t.Fatalf("continuation: %v", err)
+	}
+	var secondCursor string
+	var secondKeys []string
+	if _, err := redis.Scan(reply, &secondCursor, &secondKeys); err != nil {
+		t.Fatalf("decode continuation: %v", err)
+	}
+	if secondCursor == "0" || secondCursor == firstCursor || len(secondKeys) != 1 {
+		t.Fatalf("continuation = cursor %q keys %q, want replacement one-key page", secondCursor, secondKeys)
+	}
+	if _, err := conn.Do("SCAN", firstCursor); err == nil || err.Error() != "ERR invalid cursor" {
+		t.Fatalf("consumed numeric cursor error = %v, want ERR invalid cursor", err)
+	}
+	if _, err := conn.Do("SCAN", secondCursor, "COUNT", "99"); err != nil {
+		t.Fatalf("terminal continuation: %v", err)
+	}
+	if _, err := conn.Do("SCAN", secondCursor); err == nil || err.Error() != "ERR invalid cursor" {
+		t.Fatalf("completed numeric cursor error = %v, want ERR invalid cursor", err)
+	}
+}
+
 // TestDiscoveryMatchesRedisOnStableDataset compares only observable discovery
 // results. Redis may choose a different KEYS order or SCAN cursor/page layout;
 // on a stable dataset, the complete matching key set and cardinality must agree.

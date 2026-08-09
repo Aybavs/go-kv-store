@@ -2,6 +2,7 @@ package engine
 
 import (
 	"sort"
+	"time"
 
 	"github.com/aybavs/go-kv-store/internal/glob"
 )
@@ -11,10 +12,24 @@ type ScanResult struct {
 	Keys   []string
 }
 
+type ScanRequest struct {
+	Cursor     uint64
+	Pattern    string
+	PatternSet bool
+	Count      uint64
+}
+
 func (e *Engine) snapshotLiveKeys() []string {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 	return e.store.LiveKeys(e.readNow())
+}
+
+func (e *Engine) captureLiveKeys() ([]string, time.Time) {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	now := e.now()
+	return e.scanLiveKeys(now), now
 }
 
 func sortSnapshot(keys []string) { sort.Strings(keys) }
@@ -26,6 +41,7 @@ func filterSnapshot(keys []string, pattern string) []string {
 			out = append(out, key)
 		}
 	}
+	clear(keys[len(out):])
 	return out
 }
 
@@ -35,24 +51,22 @@ func (e *Engine) Keys(pattern string) []string {
 	return filterSnapshot(keys, pattern)
 }
 
-func (e *Engine) Scan(cursor uint64, pattern string, count uint64) ScanResult {
-	keys := e.snapshotLiveKeys()
-	sortSnapshot(keys)
-	if cursor >= uint64(len(keys)) || count == 0 {
-		return ScanResult{}
+func (e *Engine) Scan(req ScanRequest) (ScanResult, error) {
+	if req.Cursor != 0 {
+		return e.scanSessions.next(req.Cursor, req.Pattern, req.PatternSet, req.Count, e.now())
 	}
-	remaining := uint64(len(keys)) - cursor
-	examined := count
-	if examined > remaining {
-		examined = remaining
+	keys, now := e.captureLiveKeys()
+	pattern := "*"
+	if req.PatternSet {
+		pattern = req.Pattern
 	}
-	end := cursor + examined
-	next := end
-	if end == uint64(len(keys)) {
-		next = 0
-	}
-	page := keys[int(cursor):int(end)]
-	return ScanResult{Cursor: next, Keys: filterSnapshot(page, pattern)}
+	keys = e.scanFilter(keys, pattern)
+	e.scanSort(keys)
+	return e.scanSessions.start(keys, pattern, req.Count, now)
+}
+
+func (e *Engine) ClearScanSessions() {
+	e.scanSessions.clear()
 }
 
 func (e *Engine) DBSize() int {

@@ -1,6 +1,7 @@
 package command
 
 import (
+	"errors"
 	"strconv"
 	"strings"
 
@@ -8,8 +9,10 @@ import (
 )
 
 const (
-	defaultScanCount uint64 = 10
-	errInvalidCursor        = "ERR invalid cursor"
+	defaultScanCount    uint64 = 10
+	errInvalidCursor           = "ERR invalid cursor"
+	errScanSessionLimit        = "ERR scan session limit reached"
+	errScanMatchChanged        = "ERR scan MATCH cannot change during iteration"
 )
 
 func cmdKeys(e *engine.Engine, args [][]byte) Reply {
@@ -26,11 +29,14 @@ func cmdDBSize(e *engine.Engine, _ [][]byte) Reply {
 }
 
 func cmdScan(e *engine.Engine, args [][]byte) Reply {
-	cursor, pattern, count, bad := parseScan(args)
+	req, bad := parseScan(args)
 	if bad != nil {
 		return *bad
 	}
-	page := e.Scan(cursor, pattern, count)
+	page, err := e.Scan(req)
+	if err != nil {
+		return scanError(err)
+	}
 	items := make([]Reply, 0, len(page.Keys))
 	for _, key := range page.Keys {
 		items = append(items, Bulk(key))
@@ -41,43 +47,58 @@ func cmdScan(e *engine.Engine, args [][]byte) Reply {
 	})
 }
 
-func parseScan(args [][]byte) (uint64, string, uint64, *Reply) {
+func scanError(err error) Reply {
+	switch {
+	case errors.Is(err, engine.ErrInvalidCursor):
+		return Err(errInvalidCursor)
+	case errors.Is(err, engine.ErrScanSessionLimit):
+		return Err(errScanSessionLimit)
+	case errors.Is(err, engine.ErrScanMatchChanged):
+		return Err(errScanMatchChanged)
+	default:
+		return mutationError(err)
+	}
+}
+
+func parseScan(args [][]byte) (engine.ScanRequest, *Reply) {
+	req := engine.ScanRequest{Count: defaultScanCount}
 	cursorText := string(args[1])
 	if strings.HasPrefix(cursorText, "+") {
 		cursorText = cursorText[1:]
 		if cursorText == "" {
-			return 0, "", 0, errReply(errInvalidCursor)
+			return engine.ScanRequest{}, errReply(errInvalidCursor)
 		}
 	}
 	cursor, err := strconv.ParseUint(cursorText, 10, 64)
 	if err != nil {
-		return 0, "", 0, errReply(errInvalidCursor)
+		return engine.ScanRequest{}, errReply(errInvalidCursor)
 	}
-	pattern, count := "*", defaultScanCount
+	req.Cursor = cursor
 	for i := 2; i < len(args); i++ {
 		switch strings.ToUpper(string(args[i])) {
 		case "MATCH":
 			if i+1 >= len(args) {
-				return 0, "", 0, errReply(errSyntax)
+				return engine.ScanRequest{}, errReply(errSyntax)
 			}
-			pattern = string(args[i+1])
+			req.Pattern = string(args[i+1])
+			req.PatternSet = true
 			i++
 		case "COUNT":
 			if i+1 >= len(args) {
-				return 0, "", 0, errReply(errSyntax)
+				return engine.ScanRequest{}, errReply(errSyntax)
 			}
 			n, err := strconv.ParseInt(string(args[i+1]), 10, 64)
 			if err != nil {
-				return 0, "", 0, errReply(errNotAnInteger)
+				return engine.ScanRequest{}, errReply(errNotAnInteger)
 			}
 			if n <= 0 {
-				return 0, "", 0, errReply(errSyntax)
+				return engine.ScanRequest{}, errReply(errSyntax)
 			}
-			count = uint64(n)
+			req.Count = uint64(n)
 			i++
 		default:
-			return 0, "", 0, errReply(errSyntax)
+			return engine.ScanRequest{}, errReply(errSyntax)
 		}
 	}
-	return cursor, pattern, count, nil
+	return req, nil
 }

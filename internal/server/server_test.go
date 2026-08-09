@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -110,6 +111,20 @@ func (c *client) readReply(t *testing.T) string {
 		return line + "\r\n" + string(payload[:n])
 	}
 	return line
+}
+
+func (c *client) readBulkReply(t *testing.T) string {
+	t.Helper()
+	frame := c.readReply(t)
+	parts := strings.SplitN(frame, "\r\n", 2)
+	if len(parts) != 2 || len(parts[0]) < 2 || parts[0][0] != '$' {
+		t.Fatalf("reply element = %q, want RESP2 bulk string", frame)
+	}
+	length, err := strconv.Atoi(parts[0][1:])
+	if err != nil || length != len(parts[1]) {
+		t.Fatalf("bulk reply = %q, declared length %q does not match payload", frame, parts[0][1:])
+	}
+	return parts[1]
 }
 
 func itoa(n int) string {
@@ -378,23 +393,32 @@ func TestServerScanNestedArrayFraming(t *testing.T) {
 	}
 
 	c.send(t, "SCAN", "0", "COUNT", "1")
-	want := "*2\r\n$1\r\n1\r\n*1\r\n$1\r\na\r\n"
-	got := make([]byte, len(want))
-	if _, err := io.ReadFull(c.br, got); err != nil {
-		t.Fatal(err)
+	if got := c.readReply(t); got != "*2" {
+		t.Fatalf("first SCAN outer header = %q, want *2", got)
 	}
-	if string(got) != want {
-		t.Fatalf("first SCAN = %q, want %q", got, want)
+	firstCursor := c.readBulkReply(t)
+	if cursor, err := strconv.ParseUint(firstCursor, 10, 64); err != nil || cursor == 0 {
+		t.Fatalf("first SCAN cursor = %q, want nonzero unsigned decimal bulk string", firstCursor)
+	}
+	if got := c.readReply(t); got != "*1" {
+		t.Fatalf("first SCAN key array header = %q, want *1", got)
+	}
+	if got := c.readBulkReply(t); got != "a" {
+		t.Fatalf("first SCAN key = %q, want bulk string a", got)
 	}
 
-	c.send(t, "SCAN", "1", "COUNT", "1")
-	want = "*2\r\n$1\r\n0\r\n*1\r\n$1\r\nb\r\n"
-	got = make([]byte, len(want))
-	if _, err := io.ReadFull(c.br, got); err != nil {
-		t.Fatal(err)
+	c.send(t, "SCAN", firstCursor, "COUNT", "1")
+	if got := c.readReply(t); got != "*2" {
+		t.Fatalf("second SCAN outer header = %q, want *2", got)
 	}
-	if string(got) != want {
-		t.Fatalf("second SCAN = %q, want %q", got, want)
+	if got := c.readBulkReply(t); got != "0" {
+		t.Fatalf("second SCAN cursor = %q, want bulk string 0", got)
+	}
+	if got := c.readReply(t); got != "*1" {
+		t.Fatalf("second SCAN key array header = %q, want *1", got)
+	}
+	if got := c.readBulkReply(t); got != "b" {
+		t.Fatalf("second SCAN key = %q, want bulk string b", got)
 	}
 
 	c.send(t, "PING")
