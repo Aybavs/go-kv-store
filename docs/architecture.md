@@ -220,8 +220,12 @@ shutdown and admitted afterwards.
 
 > Once `BeginDrain()` returns, no new mutation can be admitted.
 
-v0.1 has no persistence, so there is no finalisation stage yet. v0.3 adds it
-between DRAINING and STOPPED.
+Persistence finalisation sits between DRAINING and STOPPED. Mutations have
+already stopped being admitted by then, so whatever is still buffered is all
+there will ever be — and a clean shutdown is where "written" stops being good
+enough. A failure there is reported to the supervisor rather than returned
+directly, so it takes the same path as any other durability failure and produces
+the same exit code.
 
 ## Failure handling
 
@@ -255,7 +259,7 @@ Each layer is tested at the level where its property is actually visible.
 | Property | Where it is pinned |
 |---|---|
 | Framing, fragmentation, malformed input, size limits | `resp` unit tests and a fuzz target |
-| Encoder/decoder agreement | `resp` round-trip test, the property the v0.3 AOF will rely on |
+| Encoder/decoder agreement | `resp` round-trip test; the append-only file rests on it |
 | No buffer aliasing | dedicated ownership tests in `command` and `server` |
 | Mutation admission under contention | `engine`, concurrent writers against a drain |
 | Shutdown, limits, deadlines | `server`, over real TCP |

@@ -171,6 +171,12 @@ Stated plainly rather than buried:
   tails and invalid records, but a flipped bit that still forms a valid record
   is undetectable. Listed as a future format improvement rather than shipped for
   completeness.
+- **The append-only file is never rewritten or compacted, so it grows without
+  bound.** It records every mutation, not the current state: writing one key
+  6 000 times produces a 243 KB file holding one live key, and recovery replays
+  all of it. Size it against your write volume rather than your dataset, and
+  restart time grows with the file. Snapshotting and AOF rewrite are non-goals,
+  not omissions.
 - **Expiration is per-key only.** No eviction policy and no maxmemory.
 - **Strings only.** No List, Hash or Set.
 - **No transactions and no Pub/Sub.**
@@ -178,7 +184,11 @@ Stated plainly rather than buried:
   append-only record, and one complete record is one recovery atomicity unit.
   Extending the record vocabulary is a decision for its own milestone. `MGET` is
   here because it is read-only and never touches the log.
-- **The dataset must fit in memory.** There is no eviction policy.
+- **The dataset must fit in memory**, and nothing evicts anything.
+- **RESP2 only, and a deliberately small subset of it.** No RESP3, no inline
+  commands, no `HELLO`, `CLIENT`, `INFO`, `SELECT` or `FLUSHDB`; there is one
+  database. [docs/protocol.md](docs/protocol.md) lists every supported command
+  and every deviation from Redis.
 - **Not intended for production workloads.**
 
 ## License

@@ -10,6 +10,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"strings"
 
 	"github.com/gomodule/redigo/redis"
 )
@@ -60,9 +61,45 @@ func main() {
 	check(err, "EXISTS")
 	fmt.Printf("EXISTS x3       -> %d present\n", n)
 
-	n, err = redis.Int(conn.Do("DEL", "language", "binary"))
+	// MGET answers one element per key in request order, with a null bulk
+	// string in place where a key is absent — not a shorter array.
+	values, err := redis.Values(conn.Do("MGET", "language", "absent", "binary"))
+	check(err, "MGET")
+	fmt.Printf("MGET x3         -> %s\n", describe(values))
+
+	// A counter starts from zero, so INCR on a fresh key is 1.
+	c, err := redis.Int64(conn.Do("INCR", "counter"))
+	check(err, "INCR")
+	d, err := redis.Int64(conn.Do("DECR", "counter"))
+	check(err, "DECR")
+	fmt.Printf("INCR then DECR  -> %d then %d\n", c, d)
+
+	// An expiry survives a read-modify-write: this is the property the
+	// append-only file records as SET key <result> PXAT <the same deadline>.
+	_, err = redis.String(conn.Do("SET", "sessions", "1", "EX", "100"))
+	check(err, "SET EX")
+	if _, err := redis.Int64(conn.Do("INCR", "sessions")); err != nil {
+		log.Fatalf("INCR on a key with a TTL: %v", err)
+	}
+	ttl, err := redis.Int64(conn.Do("TTL", "sessions"))
+	check(err, "TTL")
+	fmt.Printf("TTL after INCR  -> %d seconds, the deadline it already had\n", ttl)
+
+	removed, err := redis.Int64(conn.Do("PERSIST", "sessions"))
+	check(err, "PERSIST")
+	after, err := redis.Int64(conn.Do("TTL", "sessions"))
+	check(err, "TTL")
+	fmt.Printf("PERSIST         -> %d, and TTL is now %d\n", removed, after)
+
+	// EXPIRE with a non-positive value deletes the key and reports whether it
+	// was there, which is Redis's behaviour rather than an error.
+	gone, err := redis.Int64(conn.Do("EXPIRE", "sessions", "0"))
+	check(err, "EXPIRE 0")
+	fmt.Printf("EXPIRE k 0      -> %d, the key is deleted\n", gone)
+
+	n, err = redis.Int(conn.Do("DEL", "language", "binary", "counter"))
 	check(err, "DEL")
-	fmt.Printf("DEL x2          -> %d removed\n", n)
+	fmt.Printf("DEL x3          -> %d removed\n", n)
 
 	// Errors are values a client can act on, not transport failures: the
 	// connection stays open and usable afterwards.
@@ -73,6 +110,20 @@ func main() {
 		log.Fatalf("connection unusable after a command error: %v", err)
 	}
 	fmt.Printf("PING            -> connection still healthy\n")
+}
+
+// describe renders an MGET reply so the null element is visible rather than
+// printed as an empty string next to a genuinely empty value.
+func describe(values []interface{}) string {
+	parts := make([]string, 0, len(values))
+	for _, v := range values {
+		if v == nil {
+			parts = append(parts, "nil")
+			continue
+		}
+		parts = append(parts, fmt.Sprintf("%q", v.([]byte)))
+	}
+	return "[" + strings.Join(parts, " ") + "]"
 }
 
 func check(err error, what string) {
