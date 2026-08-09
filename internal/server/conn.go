@@ -28,16 +28,13 @@ func (s *Server) handleConn(conn net.Conn) {
 	s.serveConn(conn, r, w, fl)
 }
 
-// serveConn runs the command loop and flushes whatever it left behind.
+// serveConn runs the command loop and flushes whatever it left behind. A call
+// rather than a defer, so the flush is reached on every ordinary exit and none
+// of the panicking ones.
 //
-// The flush is reached on every ordinary exit and on none of the panicking
-// ones, which is why this is a call rather than the loop with a defer.
-//
-// The ordinary exits need it. serve returns from the top of its loop when
-// draining, before any read, so nothing triggers the deferred flush and a reply
-// that has been encoded but not yet sent would be dropped on the floor. A panic
-// must not reach it: recoverConn runs after an invariant may already be broken,
-// and emitting a half-written reply is worse than emitting none.
+// serve returns from the top of its loop when draining, before any read, so
+// nothing triggers the deferred flush and an encoded reply would be dropped. A
+// panic must not reach it: emitting a half-written reply is worse than none.
 func (s *Server) serveConn(conn net.Conn, r *resp.Reader, w *resp.Writer, fl *connFlusher) {
 	s.serve(conn, r, w, fl)
 	_ = fl.flush()

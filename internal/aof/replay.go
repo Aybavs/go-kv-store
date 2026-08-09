@@ -55,19 +55,16 @@ func (c *countingReader) Read(p []byte) (int, error) {
 	return n, err
 }
 
-// Replay reads the log and applies its effects.
+// Replay reads the log and applies its effects. One now for every deadline
+// comparison, so a key cannot expire part-way through a long replay.
 //
-// A single now is captured by the caller and used for every deadline
-// comparison, so a long replay cannot have a key expire half-way through it.
-// Deadlines that pass later are handled by ordinary lazy expiration.
+// Three outcomes, deliberately different:
 //
-// The three outcomes are deliberately different:
-//
-//   - a clean end between records: the log is fully replayed
-//   - an end part-way through a record: a torn tail. Truncate to the last
-//     complete boundary and continue, because that is what a crash produces
-//   - anything structurally wrong, anywhere: refuse. Silently skipping past
-//     mid-file corruption would load a state we cannot justify
+//   - clean end between records: fully replayed
+//   - end part-way through a record: a torn tail, truncated to the last
+//     complete boundary — that is what a crash produces
+//   - anything structurally wrong: refuse, rather than load a state we cannot
+//     justify
 func Replay(src io.Reader, now time.Time, dst Applier) (Result, error) {
 	counted := &countingReader{r: src}
 

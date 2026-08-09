@@ -1,24 +1,19 @@
 // Package cmdgen produces seeded, bounded command sequences over a small key
-// space, for differential testing against an independent oracle.
+// space, for differential testing against an independent oracle. Handwritten
+// scenarios cover the corners their author thought of; a sequence like EXPIRE,
+// INCR, TTL, PERSIST, INCR reaches one nobody would write down.
 //
-// Handwritten scenarios test the corners their author thought of. A sequence
-// like EXPIRE, INCR, TTL, PERSIST, INCR reaches a state no list of scenarios
-// contains, and that is where a derived effect goes wrong.
+// Two properties make it usable rather than merely random.
 //
-// Two properties make it usable rather than merely random:
+// A sequence is a pure function of its seed — no clock, no global rand, no map
+// iteration — so a failure is reproducible from the seed alone.
 //
-// A sequence is a pure function of its seed. The same seed produces the same
-// steps on every run and on every platform, so a failure is reproducible from
-// the seed alone. Nothing here reads the clock, the global rand, or a map.
+// Every generated TTL is long. Both consumers compare two runs against each
+// other, so a short expiry would make them time-dependent. Expiry transitions
+// belong in the handwritten scenarios, where the wait is deliberate.
 //
-// Every generated TTL is long. A sequence carrying a 50 ms expiry would be
-// time-dependent in both consumers of this package — one runs the sequence
-// against two servers in turn, the other compares a live engine against a
-// recovered one — and would flake by construction. Expiry transitions belong in
-// the handwritten scenarios, where the wait is deliberate and bounded.
-//
-// It generates text and does not know what runs it: no engine, no store, no
-// client. A test pins that it never reaches the server binary.
+// It generates text and does not know what runs it. A test pins that it never
+// reaches the server binary.
 package cmdgen
 
 import "math/rand"

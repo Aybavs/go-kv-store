@@ -252,19 +252,14 @@ func TestRejectedIncrLogsNothing(t *testing.T) {
 	}
 }
 
-// TestIncrByIsAtomicUnderContention pins the property that makes a
-// read-modify-write correct, and it was not pinned before.
+// TestIncrByIsAtomicUnderContention pins what makes a read-modify-write
+// correct. INCR is the only command that reads a value and writes one derived
+// from it: elsewhere the lock only has to order mutations, here it has to make
+// the read and the write one step.
 //
-// INCR is the only command in this server that reads a value and writes one
-// derived from it. Every other mutation carries its own new value, so the lock
-// only has to order them; here it has to make the read and the write one step.
-// Sixteen writers incrementing five hundred times each must leave exactly eight
-// thousand, and a lost update shows up as a smaller number rather than as a
-// race the detector can see — two goroutines that each read 5 and each write 6
-// are not racing on memory, they are simply both wrong.
-//
-// Verified non-vacuous by moving the read outside the lock, which is the exact
-// defect this guards: the count came back 379 of 8000.
+// The race detector cannot find a lost update — two goroutines that each read 5
+// and write 6 are not racing on memory, they are both wrong. Moving the read
+// outside the lock leaves 379 of 8000.
 func TestIncrByIsAtomicUnderContention(t *testing.T) {
 	const writers, each = 16, 500
 

@@ -106,19 +106,13 @@ func toArgs(parts []string) []interface{} {
 	return out
 }
 
-// normaliseGenerated is normalise with one exception, and only one.
+// normaliseGenerated is normalise with one exception: a positive TTL compares as
+// a bucket, because the two servers are asked in turn and the exact seconds
+// would be comparing the clock. The handwritten scenarios compare the number
+// deterministically already.
 //
-// A positive TTL reply is compared as a bucket rather than as a number. The two
-// servers are asked in turn, seconds apart at worst, so a generated sequence
-// that compared the exact remaining seconds would be comparing the clock. The
-// exact value is already compared deterministically by the handwritten
-// scenarios, which use deadlines far enough out that the number cannot change
-// between the two questions; re-deriving it from a generator would buy no
-// coverage and cost reproducibility.
-//
-// -1 and -2 still compare exactly, because those are the answers that carry the
-// property this milestone is about: an INCR that dropped a key's expiry turns a
-// positive TTL into -1, and that difference survives the bucketing.
+// -1 and -2 still compare exactly — an INCR that dropped an expiry turns a
+// positive TTL into -1, and that survives the bucketing.
 func normaliseGenerated(t *testing.T, s cmdgen.Step, reply interface{}, err error) string {
 	t.Helper()
 	got := normalise(t, reply, err)

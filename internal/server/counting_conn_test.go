@@ -5,17 +5,13 @@ import (
 	"sync/atomic"
 )
 
-// The v0.5 target named in ROADMAP.md is syscalls per request, so that is the
-// number this measures — directly, rather than inferring it from throughput.
+// connCounter counts syscalls directly rather than inferring them from
+// throughput, which on this machine varies by up to 9% between runs. A count of
+// Read and Write calls is exact and is the only figure here that carries a claim
+// on its own.
 //
-// Throughput is a proxy for the syscall count and a noisy one: v0.4 measured a
-// run-to-run spread of up to 9% end to end on this machine. A count of Read and
-// Write calls is exact, deterministic, and unaffected by what else the machine
-// is doing, which makes it the only figure here that can carry a claim on its
-// own.
-//
-// net.Conn is an interface, so counting needs no production code at all: a test
-// in this package wraps the listener and assigns s.ln directly.
+// net.Conn is an interface, so this needs no production code: a test wraps the
+// listener and assigns s.ln.
 type connCounter struct {
 	reads        atomic.Int64
 	writes       atomic.Int64
@@ -51,19 +47,10 @@ type countingConn struct {
 	counter *connCounter
 }
 
-// The call is counted before it is made, not after, and that ordering is
-// load-bearing rather than stylistic.
-//
-// Counting afterwards leaves a window in which the client has the reply but the
-// counter does not yet know about the write that delivered it. A test that
-// reads the counter as soon as its last reply arrives can therefore observe one
-// write fewer than actually happened. That is not hypothetical: it is what CI
-// on Linux reported — 63 writes for a batch of 64 — while macOS passed
-// consistently, because there the server usually finished the whole batch
-// before the client's first read returned, so the window never opened.
-//
-// Counting first closes it by construction: bytes cannot reach the client
-// before the write that carries them has been counted.
+// Counted before the call, not after: counting afterwards leaves a window where
+// the client has the reply and the counter does not yet know about the write
+// that delivered it, so a test reading the counter as its last reply arrives
+// sees one write too few. Linux CI reported 63 for a batch of 64.
 func (c *countingConn) Read(p []byte) (int, error) {
 	c.counter.reads.Add(1)
 	n, err := c.Conn.Read(p)

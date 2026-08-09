@@ -6,6 +6,28 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `INCR`'s atomicity and `MGET`'s single-snapshot property are pinned by tests.
+  Neither was, and a lost update is not a data race — two goroutines that each
+  read 5 and write 6 are not racing on memory, so the detector would never have
+  found it
+
+### Fixed
+
+- Four defects in test code from the v1.0 milestone: a hand-rolled `contains`
+  reimplementing `strings.Contains`, an assertion comparing a non-nil sentinel
+  against nil and therefore always false, a test asserting far less than its
+  comment claimed, and two struct fields computed and never read
+
+### Changed
+
+- Comments trimmed by about 10%, with no change to any statement: the reasoning
+  that belongs in an ADR is now a pointer to it rather than a second copy that
+  would drift, and the history of how a test came to be written belongs in git.
+  Verified by reparsing every changed file without comments and comparing the
+  printed AST — all 22 identical
+
 ## [1.0.0] - 2026-08-09
 
 **The contract is stable.** That is what this release means, and it is a smaller

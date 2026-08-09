@@ -155,20 +155,13 @@ func TestMutationsStopBeingAcceptedAfterShutdown(t *testing.T) {
 	}
 }
 
-// TestPendingReplyIsDeliveredWhenDrainingBegins guards the exit path that the
-// deferred flush created.
+// TestPendingReplyIsDeliveredWhenDrainingBegins guards the exit path the
+// deferred flush created: serve returns from the top of its loop when draining,
+// before any read, so nothing triggers the flush and an already-encoded reply
+// would never be sent.
 //
-// serve returns from the top of its loop when the server is draining, before
-// any read — so nothing triggers the flush that a blocking read would. A reply
-// already encoded at that moment sits in the writer and, without serveConn's
-// final flush, is never sent: the client sees the connection close with no
-// answer to a command the server had already executed.
-//
-// The situation is constructed rather than waited for. Reaching it through a
-// live server would mean the drain landing between the reply being encoded and
-// the loop coming round, which is a window no test can schedule — and this
-// project has been bitten four times by tests that asserted a scheduling
-// outcome instead of building one.
+// Constructed, not waited for — reaching it through a live server needs the
+// drain to land between encoding the reply and the loop coming round.
 func TestPendingReplyIsDeliveredWhenDrainingBegins(t *testing.T) {
 	cli, srv := net.Pipe()
 	defer cli.Close()

@@ -393,12 +393,9 @@ func (b *blockingWriteFile) syncCount() int {
 // it once. Everything waiting in that buffer shares the syscall by
 // construction.
 //
-// The first version of this test appended from twenty goroutines and asserted
-// that fewer than twenty syncs resulted. That is a scheduling outcome, not a
-// construction: it passed locally and failed on both CI runners at 20 syncs for
-// 20 writers, because each writer got picked up on its own before the next
-// arrived. Batching is a property of what is in the buffer when a flush runs,
-// so the buffer is filled deliberately here rather than raced for.
+// Batching is a property of what is in the buffer when a flush runs, so the
+// buffer is filled deliberately. Asserting "fewer syncs than writers" from
+// concurrent appends is a scheduling outcome and fails on a small runner.
 func TestGroupCommit(t *testing.T) {
 	f := &blockingWriteFile{release: make(chan struct{})}
 	l, _ := openTestLog(t, f, Always)

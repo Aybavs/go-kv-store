@@ -6,20 +6,13 @@ import (
 	"testing"
 )
 
-// TestFlagSurfaceIsStable is one half of turning v1.0's compatibility promise
-// into something that can be broken loudly.
+// TestFlagSurfaceIsStable holds the compatibility promise of ADR 0007: a 1.x may
+// add a flag, and may not rename one, remove one, or change a default. Defaults
+// are in the promise because a default is behaviour nobody typed.
 //
-// ADR 0007 puts flag names *and their defaults* inside the promise: a default is
-// behaviour a user never typed and therefore never opted into, so changing one
-// in a patch release alters a running system silently, and nobody reads the
-// notes for a patch.
-//
-// The table below is that promise written down. A 1.x may add a flag, which
-// means adding a row here. It may not rename one, remove one, or change what one
-// defaults to — each of those fails this test instead of reaching a user.
-//
-// Defaults are compared as the strings the flag package reports, because that is
-// what `--help` prints and therefore what a reader is told.
+// The table is that promise written down; adding a flag means adding a row.
+// Defaults compare as the strings the flag package reports, which is what
+// --help prints.
 func TestFlagSurfaceIsStable(t *testing.T) {
 	want := map[string]string{
 		"host":               "127.0.0.1",

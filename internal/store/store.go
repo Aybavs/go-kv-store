@@ -144,17 +144,14 @@ func (s *Store) Len(now time.Time) int {
 	return n
 }
 
-// ReclaimExpired physically removes up to limit expired keys, reporting how
-// many it removed and how many it examined. It is the whole surface the active
-// expiration worker needs; how often to call it and with what limit is the
-// engine's decision, not this package's.
+// ReclaimExpired physically removes up to limit expired keys, reporting how many
+// it removed and examined. Interval and limit are the engine's decision.
 //
-// Iterating expires rather than data is the point of keeping that index: a
-// scan of the main map finds nothing when TTL-bearing keys are sparse.
+// It iterates expires rather than data, which is why that index exists: scanning
+// the main map finds nothing when TTL-bearing keys are sparse.
 //
-// No claim is made about which keys get examined. Go's map iteration order is
-// not a randomness contract and is not treated as one. The guarantee is only
-// that work per call is bounded and that reclamation is eventual.
+// Which keys get examined is not a claim — Go's map order is not a randomness
+// contract. The guarantee is bounded work per call and eventual reclamation.
 func (s *Store) ReclaimExpired(now time.Time, limit int) (removed, examined int) {
 	if limit <= 0 {
 		return 0, 0

@@ -8,17 +8,12 @@ import (
 	"github.com/aybavs/go-kv-store/internal/engine"
 )
 
-// The third of v1.0's contract tests. ADR 0007 puts the error *classes* inside
-// the compatibility promise and leaves the message text out: a client branches
-// on the class, and the wording exists to be read by a person at a terminal.
+// ADR 0007 puts the error classes in the compatibility promise and leaves the
+// text out. That split only works if the wording cannot drift by accident: this
+// table is where it is allowed to change, so a reworded message is an edit here
+// rather than a silent difference from docs/protocol.md.
 //
-// That split only works if the wording cannot drift by accident. This table is
-// where it is allowed to change: a reworded message shows up as an edit here,
-// which is a decision, rather than as a silent difference from what
-// docs/protocol.md tells a reader to expect.
-//
-// Every row is produced through Dispatch, so the strings are what a client
-// actually receives rather than what a constant says.
+// Every row goes through Dispatch, so the strings are what a client receives.
 func TestDocumentedErrorClassesAreProduced(t *testing.T) {
 	tests := []struct {
 		class string
