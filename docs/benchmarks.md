@@ -4,9 +4,12 @@ The key-discovery gates are current as of v1.1.0. The remaining
 micro-benchmarks, end-to-end throughput, latency distributions, and syscall
 measurements are the v0.5.0 record; each historical comparison is labelled.
 
-Every number here comes from an actual run on the machine named below. Nothing
-is estimated. Evidence retained from a previous implementation or version is
-explicitly labelled rather than presented as a current re-measurement.
+Benchmark timings and allocator metrics here come from actual runs on the
+machine named below; they are measured, not estimated. Retained-byte values are
+the session manager's conservative accounting estimate as observed and reported
+by the benchmark, not a measurement of process RSS. Evidence retained from a
+previous implementation or version is explicitly labelled rather than
+presented as a current re-measurement.
 
 Two historical artefacts are deliberately labelled: the rejected v1.1 SCAN
 baseline below, because it is the gate the replacement answers, and the v0.3.0

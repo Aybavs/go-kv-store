@@ -108,10 +108,12 @@ wait for abandoned sessions to expire, or retry with a larger `COUNT` when that
 can finish in one page. Sessions are also released at completion and shutdown.
 These bounds are fixed server policy, not configuration flags.
 
-`KEYS pattern` uses the same live-key snapshot and byte glob matcher. It is an
-O(N) whole-keyspace operation intended only for debugging and small datasets;
-use `SCAN` for a key browser. Results are currently bytewise sorted for
-determinism, but clients must not depend on that ordering.
+`KEYS pattern` uses the same live-key snapshot and byte glob matcher. It
+snapshots, scans, and matches N live keys, which is O(N) keyspace work, then
+currently bytewise-sorts the N-name snapshot, adding O(N log N) comparisons in
+the worst case. It is intended only for debugging and small datasets; use
+`SCAN` for a key browser. Sorting makes results deterministic, but clients must
+not depend on that ordering.
 
 `DBSIZE` is an O(N) count of logically live keys. It does not expose the raw map
 length, so expired entries awaiting physical reclamation are not counted, and

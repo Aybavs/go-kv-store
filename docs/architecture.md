@@ -203,10 +203,12 @@ See [ADR 0001](design-decisions/0001-storage-concurrency-and-value-representatio
 
 ## Key discovery
 
-`KEYS`, initial `SCAN`, and `DBSIZE` judge every entry against one captured
-instant while holding the engine data `RLock` (the clock read is skipped where
-no key has a deadline). The store remains passive: it receives that time and
-neither locks nor reads a clock itself.
+`KEYS` and `DBSIZE` judge every entry against one instant while holding the
+engine data `RLock`; their `readNow` path skips the clock read when no key has a
+deadline. Initial `SCAN` unconditionally captures one `now` instant under the
+same `RLock` and uses it both for key liveness and the new session's lifecycle.
+The store remains passive: it receives time from the engine and neither locks
+nor reads a clock itself.
 
 `KEYS` copies all logically live names, releases the lock, sorts bytewise and
 applies the shared byte-oriented glob matcher. Its deterministic order is an

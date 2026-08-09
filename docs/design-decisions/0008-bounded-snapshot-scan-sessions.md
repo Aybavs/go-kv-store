@@ -113,7 +113,7 @@ not record maxima, and loaded SET sample throughput was 5.9–6.4% lower. The
 decision is therefore scoped to bounded interactive browsing at the measured
 100k-key scale, not an unbounded-session or server-wide latency guarantee.
 
-The complete commands and all 1k/10k/100k results are published in
+Reproducible commands and summarized 1k/10k/100k results are published in
 [`docs/benchmarks.md`](../benchmarks.md).
 
 ## Rejected: keep the stateless sorted-offset baseline
