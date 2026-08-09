@@ -358,3 +358,62 @@ func TestExpiresIsSubsetOfData(t *testing.T) {
 		check(i)
 	}
 }
+
+// TestExpiresAt covers the accessor the INCR effect derivation depends on. The
+// instant it returns must be the one Set was given, not one reconstructed from
+// the time remaining: an AOF record carrying a different number carries a
+// different expiry.
+func TestExpiresAt(t *testing.T) {
+	s := New()
+	deadline := at(30 * time.Second)
+	setTTL(s, "ttl", "v", deadline)
+	setNoTTL(s, "plain", "v")
+
+	got, ok := s.ExpiresAt("ttl")
+	if !ok {
+		t.Fatal("ExpiresAt reported no deadline for a key that has one")
+	}
+	if !got.Equal(deadline) {
+		t.Fatalf("ExpiresAt = %v, want %v", got, deadline)
+	}
+	if _, ok := s.ExpiresAt("plain"); ok {
+		t.Error("ExpiresAt reported a deadline for a key with no TTL")
+	}
+	if _, ok := s.ExpiresAt("missing"); ok {
+		t.Error("ExpiresAt reported a deadline for a missing key")
+	}
+}
+
+// A key past its deadline still reports the deadline it was given. ExpiresAt
+// answers what is recorded; liveness is Get's answer and the caller already has
+// it. Pinned so nobody "fixes" this into a second expiry check.
+func TestExpiresAtIgnoresLiveness(t *testing.T) {
+	s := New()
+	deadline := at(10 * time.Second)
+	setTTL(s, "k", "v", deadline)
+
+	if _, ok := s.Get("k", at(20*time.Second)); ok {
+		t.Fatal("the key was supposed to be expired at this instant")
+	}
+	got, ok := s.ExpiresAt("k")
+	if !ok || !got.Equal(deadline) {
+		t.Fatalf("ExpiresAt = %v, %v; want %v, true", got, ok, deadline)
+	}
+}
+
+// Persist and Delete both clear the recorded deadline, so the accessor cannot
+// outlive the entry it describes and break keys(expires) ⊆ keys(data).
+func TestExpiresAtFollowsPersistAndDelete(t *testing.T) {
+	s := New()
+	setTTL(s, "a", "v", at(time.Minute))
+	setTTL(s, "b", "v", at(time.Minute))
+
+	s.Persist("a", base)
+	if _, ok := s.ExpiresAt("a"); ok {
+		t.Error("ExpiresAt still reports a deadline after Persist")
+	}
+	s.Delete("b")
+	if _, ok := s.ExpiresAt("b"); ok {
+		t.Error("ExpiresAt still reports a deadline after Delete")
+	}
+}

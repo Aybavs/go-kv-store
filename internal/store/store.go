@@ -117,6 +117,20 @@ func (s *Store) TTL(key string, now time.Time) (time.Duration, TTLStatus) {
 	return deadline.Sub(now), HasTTL
 }
 
+// ExpiresAt reports the absolute deadline recorded for key, if it has one.
+//
+// It answers "what is recorded", not "is the key alive": it takes no now, so it
+// cannot and does not judge expiry. Callers already have the liveness answer
+// from Get, and the one caller that needs this — deriving an INCR effect — needs
+// the deadline the key was given, not one recomputed from the time left on it.
+// A deadline reconstructed by adding a remaining duration to the current instant
+// is a different number, and in an AOF record a different number is a different
+// expiry.
+func (s *Store) ExpiresAt(key string) (time.Time, bool) {
+	deadline, ok := s.expires[key]
+	return deadline, ok
+}
+
 // Len counts the keys that are live at now, not the size of the map. A count
 // that included expired-but-unreclaimed keys would make reclamation observable
 // to callers, which is exactly the distinction this package maintains.
