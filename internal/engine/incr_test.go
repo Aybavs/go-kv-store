@@ -4,6 +4,7 @@ import (
 	"errors"
 	"math"
 	"strconv"
+	"sync"
 	"testing"
 	"time"
 
@@ -249,4 +250,90 @@ func TestRejectedIncrLogsNothing(t *testing.T) {
 	if len(got) != 2 {
 		t.Fatalf("wrote %d records, want 2 (the SETs only): %+v", len(got), got)
 	}
+}
+
+// TestIncrByIsAtomicUnderContention pins the property that makes a
+// read-modify-write correct, and it was not pinned before.
+//
+// INCR is the only command in this server that reads a value and writes one
+// derived from it. Every other mutation carries its own new value, so the lock
+// only has to order them; here it has to make the read and the write one step.
+// Sixteen writers incrementing five hundred times each must leave exactly eight
+// thousand, and a lost update shows up as a smaller number rather than as a
+// race the detector can see — two goroutines that each read 5 and each write 6
+// are not racing on memory, they are simply both wrong.
+//
+// Verified non-vacuous by moving the read outside the lock, which is the exact
+// defect this guards: the count came back 379 of 8000.
+func TestIncrByIsAtomicUnderContention(t *testing.T) {
+	const writers, each = 16, 500
+
+	e := newTestEngine(t)
+	var wg sync.WaitGroup
+	for i := 0; i < writers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < each; j++ {
+				if _, err := e.IncrBy("counter", 1); err != nil {
+					t.Errorf("IncrBy: %v", err)
+					return
+				}
+			}
+		}()
+	}
+	wg.Wait()
+
+	got, ok := e.Get("counter")
+	if !ok {
+		t.Fatal("the counter is missing")
+	}
+	n, err := strconv.ParseInt(got, 10, 64)
+	if err != nil {
+		t.Fatalf("counter holds %q: %v", got, err)
+	}
+	if want := int64(writers * each); n != want {
+		t.Fatalf("counter = %d, want %d: %d updates were lost, so the read and the "+
+			"write are not one step", n, want, want-n)
+	}
+}
+
+// TestMGetIsOneSnapshot pins what holding a single RLock for the whole call
+// buys, in the one way a test can observe it: the same key asked for twice in
+// one MGET must answer the same thing, however hard it is being written to.
+//
+// A version that took the lock per key would pass every other test in this
+// package and fail this one.
+func TestMGetIsOneSnapshot(t *testing.T) {
+	e := newTestEngine(t)
+	if err := e.Set("k", "0", NoExpiry()); err != nil {
+		t.Fatalf("Set: %v", err)
+	}
+
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; ; i++ {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			_ = e.Set("k", strconv.Itoa(i), NoExpiry())
+		}
+	}()
+
+	for i := 0; i < 100000; i++ {
+		got := e.MGet([]string{"k", "k"})
+		if got[0] != got[1] {
+			close(stop)
+			wg.Wait()
+			t.Fatalf("one MGET saw %q and %q for the same key; the call is not a "+
+				"single snapshot", got[0].Value, got[1].Value)
+		}
+	}
+	close(stop)
+	wg.Wait()
 }
