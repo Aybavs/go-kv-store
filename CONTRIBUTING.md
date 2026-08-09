@@ -30,6 +30,20 @@ Without `REDIS_ADDR` they skip with an explanatory message. CI fails if they
 skip there, since a silent skip would turn the differential comparison into a
 no-op that still reports green.
 
+### Generated sequences
+
+Part of the suite runs seeded command sequences against both servers and
+compares them step by step. The seed list is fixed, so a divergence CI reports
+is one you can run again. The failure message prints the seed, the diverging
+step and the whole sequence leading to it.
+
+    KV_GEN_SEED=42 go test ./internal/conformance/ -run TestGeneratedSequencesMatchRedis
+    KV_GEN_RUNS=200 go test ./internal/conformance/ -run TestGeneratedSequencesMatchRedis
+
+`KV_GEN_SEED` runs one seed — use the one from a failure. `KV_GEN_RUNS` runs
+seeds 1..N, for looking further than CI does. Neither is set in CI: a seed taken
+from the clock would report failures nobody could reproduce.
+
 ## Benchmarks
 
     make bench
