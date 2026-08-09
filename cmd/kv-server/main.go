@@ -25,50 +25,79 @@ func main() {
 	}
 }
 
-func run() error {
-	var (
-		host            = flag.String("host", "127.0.0.1", "address to bind")
-		port            = flag.Int("port", 6380, "port to listen on")
-		maxClients      = flag.Int("max-clients", 1024, "maximum concurrent client connections")
-		timeout         = flag.Duration("timeout", 0, "idle read timeout (0 disables)")
-		shutdownTimeout = flag.Duration("shutdown-timeout", 10*time.Second, "graceful shutdown budget")
-		maxBulk         = flag.Int("max-bulk-length", 64<<20, "maximum bulk string length in bytes")
-		maxArgs         = flag.Int("max-array-elements", 1024, "maximum arguments per command")
-		maxCommand      = flag.Int("max-command-bytes", 128<<20, "maximum total argument bytes in one command")
-		logLevel        = flag.String("loglevel", "info", "log level: debug, info, warn, error")
+// options holds every value the command line can set. It exists so the flag
+// surface can be enumerated by something other than the code that consumes it.
+//
+// From v1.0 that surface is part of the compatibility promise: a 1.x may add a
+// flag and may not rename one, remove one, or change what one defaults to. ADR
+// 0007 explains why defaults are included — a default is behaviour nobody typed
+// and therefore never opted into. registerFlags is what lets a test hold the
+// promise to that, by binding into a FlagSet it owns rather than into the global
+// one the process uses.
+type options struct {
+	host            *string
+	port            *int
+	maxClients      *int
+	timeout         *time.Duration
+	shutdownTimeout *time.Duration
+	maxBulk         *int
+	maxArgs         *int
+	maxCommand      *int
+	logLevel        *string
 
-		appendOnly     = flag.Bool("appendonly", false, "write an append-only file so data survives a restart")
-		appendFilename = flag.String("appendfilename", "appendonly.aof", "path to the append-only file")
+	appendOnly     *bool
+	appendFilename *string
+	appendFsync    *string
+}
+
+func registerFlags(fs *flag.FlagSet) *options {
+	return &options{
+		host:            fs.String("host", "127.0.0.1", "address to bind"),
+		port:            fs.Int("port", 6380, "port to listen on"),
+		maxClients:      fs.Int("max-clients", 1024, "maximum concurrent client connections"),
+		timeout:         fs.Duration("timeout", 0, "idle read timeout (0 disables)"),
+		shutdownTimeout: fs.Duration("shutdown-timeout", 10*time.Second, "graceful shutdown budget"),
+		maxBulk:         fs.Int("max-bulk-length", 64<<20, "maximum bulk string length in bytes"),
+		maxArgs:         fs.Int("max-array-elements", 1024, "maximum arguments per command"),
+		maxCommand:      fs.Int("max-command-bytes", 128<<20, "maximum total argument bytes in one command"),
+		logLevel:        fs.String("loglevel", "info", "log level: debug, info, warn, error"),
+
+		appendOnly:     fs.Bool("appendonly", false, "write an append-only file so data survives a restart"),
+		appendFilename: fs.String("appendfilename", "appendonly.aof", "path to the append-only file"),
 		// The everysec wording is deliberate and belongs here rather than only
 		// in docs. Redis's everysec acknowledges before the write; ours
 		// acknowledges only once write() has succeeded. Someone reading --help
 		// is exactly the person who would otherwise assume the names mean the
 		// same thing.
-		appendFsync = flag.String("appendfsync", "everysec",
+		appendFsync: fs.String("appendfsync", "everysec",
 			"durability: 'always' acknowledges after fsync; 'everysec' acknowledges after write() succeeds "+
 				"and syncs about once a second. Note this is stronger than Redis's everysec, which acknowledges "+
-				"before writing")
-	)
+				"before writing"),
+	}
+}
+
+func run() error {
+	opt := registerFlags(flag.CommandLine)
 	flag.Parse()
 
-	level, err := parseLevel(*logLevel)
+	level, err := parseLevel(*opt.logLevel)
 	if err != nil {
 		return err
 	}
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
 
 	cfg := server.DefaultConfig()
-	cfg.Addr = fmt.Sprintf("%s:%d", *host, *port)
-	cfg.MaxClients = *maxClients
-	cfg.ReadTimeout = *timeout
-	cfg.ShutdownTimeout = *shutdownTimeout
+	cfg.Addr = fmt.Sprintf("%s:%d", *opt.host, *opt.port)
+	cfg.MaxClients = *opt.maxClients
+	cfg.ReadTimeout = *opt.timeout
+	cfg.ShutdownTimeout = *opt.shutdownTimeout
 	cfg.Limits = resp.Limits{
-		MaxArrayElements: *maxArgs,
-		MaxBulkLength:    *maxBulk,
-		MaxCommandBytes:  *maxCommand,
+		MaxArrayElements: *opt.maxArgs,
+		MaxBulkLength:    *opt.maxBulk,
+		MaxCommandBytes:  *opt.maxCommand,
 	}
 
-	policy, err := parsePolicy(*appendFsync)
+	policy, err := parsePolicy(*opt.appendFsync)
 	if err != nil {
 		return err
 	}
@@ -78,16 +107,16 @@ func run() error {
 	sup := server.NewSupervisor()
 	eng := engine.New(sup.Fatal)
 
-	if *appendOnly {
+	if *opt.appendOnly {
 		// Recovery happens before the listener opens. A file we cannot trust
 		// must stop the process, not produce a server answering from a state
 		// nobody can account for.
-		res, err := eng.OpenLog(*appendFilename, policy, sup.Fatal)
+		res, err := eng.OpenLog(*opt.appendFilename, policy, sup.Fatal)
 		if err != nil {
-			return fmt.Errorf("recovering %s: %w", *appendFilename, err)
+			return fmt.Errorf("recovering %s: %w", *opt.appendFilename, err)
 		}
 		logger.Info("recovered append-only file",
-			"path", *appendFilename,
+			"path", *opt.appendFilename,
 			"records", res.Records,
 			"offset", res.LastValidOffset)
 		if res.Truncated {
