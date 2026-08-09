@@ -248,13 +248,25 @@ func TestSyncFailureIsFatal(t *testing.T) {
 // diverging further once the log is broken.
 func TestFailedLogStaysFailed(t *testing.T) {
 	f := &fakeFile{writeErr: errors.New("disk full")}
-	l, _ := openTestLog(t, f, EverySec)
+	l, fatal := openTestLog(t, f, EverySec)
 
 	seq, err := l.Append(DeriveSet("k", "v", time.Time{}, false))
 	if err != nil {
 		t.Fatalf("first Append: %v", err)
 	}
 	_ = awaitOrFail(t, l, seq, EverySec)
+
+	// Waiting for the report, not for Await to return. flush advances the
+	// written marker before it records the failure, and this file accepts every
+	// byte and then errors -- the n>0-with-an-error case -- so a waiter under
+	// everysec can legitimately be woken by the progress and see nil. fail sets
+	// the failed state before it calls onFatal, so the report is the point at
+	// which the next Append must be refused.
+	select {
+	case <-fatal:
+	case <-time.After(3 * time.Second):
+		t.Fatal("the write failure was never reported")
+	}
 
 	if _, err := l.Append(DeriveSet("k2", "v2", time.Time{}, false)); !errors.Is(err, ErrFailed) {
 		t.Fatalf("Append after failure = %v, want ErrFailed", err)

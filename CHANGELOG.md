@@ -24,6 +24,14 @@ What changed is the tests and the comments.
 
 ### Fixed
 
+- A flaky test, caught by CI on Linux while passing on its own branch and on
+  every local run. `TestFailedLogStaysFailed` waited for `Await` to return and
+  then assumed the failure had been recorded, but `flush` advances the written
+  marker *before* it records the failure, and the fake file accepts every byte
+  and then errors — the n>0-with-an-error case — so a waiter under `everysec`
+  can legitimately be woken by the progress and see `nil`. It now waits for the
+  fatal report, which `fail` makes after setting the state. The server was not
+  at fault and the ordering it uses is the documented one
 - Four defects in test code from the v1.0 milestone: a hand-rolled `contains`
   reimplementing `strings.Contains`, an assertion comparing a non-nil sentinel
   against nil and therefore always false, a test asserting far less than its
