@@ -16,9 +16,34 @@ func (s *Server) handleConn(conn net.Conn) {
 	defer s.releaseConn(conn)
 	defer s.recoverConn(conn)
 
-	r := resp.NewReader(conn, s.cfg.Limits)
 	w := resp.NewWriter(conn)
+	fl := &connFlusher{w: w}
 
+	var src io.Reader = conn
+	if !s.cfg.flushEveryReply {
+		src = &flushBeforeRead{src: conn, fl: fl}
+	}
+	r := resp.NewReader(src, s.cfg.Limits)
+
+	s.serveConn(conn, r, w, fl)
+}
+
+// serveConn runs the command loop and flushes whatever it left behind.
+//
+// The flush is reached on every ordinary exit and on none of the panicking
+// ones, which is why this is a call rather than the loop with a defer.
+//
+// The ordinary exits need it. serve returns from the top of its loop when
+// draining, before any read, so nothing triggers the deferred flush and a reply
+// that has been encoded but not yet sent would be dropped on the floor. A panic
+// must not reach it: recoverConn runs after an invariant may already be broken,
+// and emitting a half-written reply is worse than emitting none.
+func (s *Server) serveConn(conn net.Conn, r *resp.Reader, w *resp.Writer, fl *connFlusher) {
+	s.serve(conn, r, w, fl)
+	_ = fl.flush()
+}
+
+func (s *Server) serve(conn net.Conn, r *resp.Reader, w *resp.Writer, fl *connFlusher) {
 	for {
 		// Draining means "finish work already begun", not "consume whatever
 		// the client had already buffered".
@@ -33,28 +58,35 @@ func (s *Server) handleConn(conn net.Conn) {
 
 		args, err := r.ReadCommand()
 		if err != nil {
-			s.reportReadError(conn, w, err)
+			s.reportReadError(conn, w, fl, err)
 			return
 		}
 
 		reply := s.reg.Dispatch(args)
 
+		// Set per reply, not per flush. The deadline is absolute, so the one
+		// established here still governs the flush that follows a few
+		// microseconds later — including the deferred one, and including a
+		// flush bufio performs on its own when the buffer fills mid-reply.
 		_ = conn.SetWriteDeadline(time.Now().Add(s.cfg.WriteTimeout))
 		if err := writeReply(w, reply); err != nil {
+			// Those bytes are a truncated frame; they must not be sent.
+			fl.fail()
 			s.log.Debug("write failed", "err", err)
 			return
 		}
-		// One flush per response; batching is deliberately not attempted here.
-		if err := w.Flush(); err != nil {
-			s.log.Debug("flush failed", "err", err)
-			return
+		if s.cfg.flushEveryReply {
+			if err := fl.flush(); err != nil {
+				s.log.Debug("flush failed", "err", err)
+				return
+			}
 		}
 	}
 }
 
 // reportReadError writes a final error to the client where that is meaningful,
 // then lets the caller close the connection.
-func (s *Server) reportReadError(conn net.Conn, w *resp.Writer, err error) {
+func (s *Server) reportReadError(conn net.Conn, w *resp.Writer, fl *connFlusher, err error) {
 	var pe *resp.ProtocolError
 	switch {
 	case errors.Is(err, io.EOF):
@@ -62,9 +94,14 @@ func (s *Server) reportReadError(conn net.Conn, w *resp.Writer, err error) {
 	case errors.As(err, &pe):
 		_ = conn.SetWriteDeadline(time.Now().Add(s.cfg.WriteTimeout))
 		_ = w.WriteError("ERR Protocol error: " + pe.Msg)
-		_ = w.Flush()
+		// Through the flusher, so a connection whose writes have already failed
+		// is not written to again.
+		_ = fl.flush()
 		s.log.Debug("protocol error, closing connection", "err", err)
 	default:
+		// Includes errFlushFailed, raised by the deferred flush and surfaced by
+		// the reader as a transport failure. Nothing is written back: the write
+		// side is the thing that just broke.
 		s.log.Debug("read failed", "err", err)
 	}
 }

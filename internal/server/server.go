@@ -26,6 +26,17 @@ type Config struct {
 	WriteTimeout    time.Duration
 	ShutdownTimeout time.Duration
 	Limits          resp.Limits
+
+	// flushEveryReply restores the pre-v0.5 behaviour of one write syscall per
+	// reply. Unexported and false by default, so it does not exist as far as
+	// any caller outside this package is concerned.
+	//
+	// It is here for the measurement rather than for configuration. Comparing
+	// the two behaviours across two commits would mean two runs minutes apart
+	// on a machine whose end-to-end spread v0.4 measured at up to 9%; with the
+	// switch, the harness interleaves them inside one process, which is the
+	// only way the difference means anything.
+	flushEveryReply bool
 }
 
 func DefaultConfig() Config {
