@@ -191,17 +191,10 @@ func (r *Reader) readBulk() error {
 // growBuf makes room for need bytes, doubling as slices.Grow would but never
 // past MaxCommandBytes.
 //
-// The cap is about peak memory, not about the limit itself — that is already
-// enforced against the declared length before any payload is read. During a
-// grow both arrays are live while the copy runs, so an unbounded doubling makes
-// the peak the old array plus twice the limit: measured at v0.1.1, a 128 MiB
-// limit peaked at 417 MB resident, about three times the number the operator
-// configured.
-//
-// A new array capped at the limit cannot be the larger of the two, so the peak
-// becomes old plus limit instead. It costs one extra copy in the case where the
-// doubling would have overshot, on a path that is already reading tens of
-// megabytes off a socket.
+// The cap bounds peak memory, not the limit — that is enforced against the
+// declared length before any payload is read. Both arrays are live during the
+// copy, so an unbounded doubling peaks at the old array plus twice the limit.
+// See SECURITY.md for the measured figures.
 func (r *Reader) growBuf(need int) {
 	if cap(r.buf) >= need {
 		return

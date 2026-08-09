@@ -21,32 +21,21 @@ import (
 // has to be reproducible from the seed.
 var recoverySeeds = []int64{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16}
 
-// Recovery is checked after every step, not once at the end. That is not
-// thoroughness for its own sake — it is the difference between a test and a
-// decoration.
-//
-// Measured: across the sixteen seeds, only 3 of 64 final key-states are decided
-// by a TTL-preserving INCR. Every other key is last written by a later SET, DEL
-// or EXPIRE, whose record is correct regardless. So a version of this test that
-// compared only the end state let the very mutation it exists to catch — INCR
-// deriving its effect without the deadline — pass on all sixteen seeds.
+// Recovery is checked after every step, not once at the end. Only 3 of 64 final
+// key-states are decided by a TTL-preserving INCR; every other key is last
+// written by a later SET, DEL or EXPIRE whose record is correct regardless. An
+// end-state comparison passes with the mutation this exists to catch.
 const checkpointEvery = 1
 
 // TestGeneratedSequencesSurviveRecovery replays an arbitrary command sequence
-// out of the append-only file and requires the recovered state to match the
-// live one at every point along the way.
+// out of the append-only file and requires the recovered state to match the live
+// one at every step. The differential suite compares us against Redis, and Redis
+// has no opinion about our AOF; INCR is the first command whose effect depends
+// on stored state, which is ADR-0004's counterexample.
 //
-// The differential suite compares us against Redis, and Redis has no opinion
-// about our AOF. Until v0.4 that gap did not matter much: every effect was
-// derived from the command's own arguments. INCR is the project's first
-// read-modify-write command, which is the exact shape of ADR-0004's
-// counterexample, and nothing until now has taken a sequence nobody wrote by
-// hand and asked whether the derived effects reconstruct the state.
-//
-// The Always policy is what makes checkpointing possible: every acknowledged
-// mutation is already on disk, so copying the file mid-sequence yields exactly
-// the records for the steps issued so far. What survives a process being killed
-// is package durability's question, not this one.
+// Always is what makes checkpointing possible: every acknowledged mutation is
+// already on disk, so a copy taken mid-sequence holds exactly the records issued
+// so far. Surviving a kill is package durability's question.
 func TestGeneratedSequencesSurviveRecovery(t *testing.T) {
 	cfg := cmdgen.DefaultConfig()
 

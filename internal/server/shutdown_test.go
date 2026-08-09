@@ -17,17 +17,12 @@ import (
 	"github.com/aybavs/go-kv-store/internal/resp"
 )
 
-// The shutdown state machine has eight behaviours the design spec enumerates.
-// Two of them were pinned before this file existed — an idle client cannot block
-// the drain, and no mutation is admitted after DRAINING. The rest were not, and
-// an audit after v0.5 found that two of the untested ones are error paths the
-// suite had never executed at all: ErrShutdownTimeout, and the branch where
-// final persistence fails.
+// The six shutdown behaviours the design spec enumerates and the suite did not
+// cover. Two are error paths nothing had executed: ErrShutdownTimeout, and the
+// branch where final persistence fails. Both decide the exit code.
 //
-// Each test here constructs the situation rather than waiting for it. Reaching
-// most of these through a live server means a signal landing inside a specific
-// microsecond, and a test that hopes for a schedule instead of building one has
-// failed this project four times already.
+// Each situation is constructed rather than waited for; reaching most of them
+// through a live server needs a signal landing in a specific microsecond.
 
 // blockingConn is a connection whose handler is busy rather than parked in a
 // socket read: a command in flight, or a write to a client that is not reading.
@@ -234,11 +229,8 @@ func TestShutdownTimeoutIsReported(t *testing.T) {
 		t.Fatalf("gracefulShutdown = %v, want ErrShutdownTimeout", err)
 	}
 
-	// The exit code is what this decides, and main turns a non-nil return into
-	// a non-zero exit. Asserting that directly, because an earlier version of
-	// this test wrote errors.Is(ErrShutdownTimeout, nil) here, which compares a
-	// non-nil sentinel against nil and is therefore always false: a line that
-	// looked like a check and was not.
+	// main turns a non-nil return into a non-zero exit, so assert the value
+	// itself and not errors.Is(sentinel, nil), which is always false.
 	if err == nil {
 		t.Fatal("a shutdown that could not drain returned nil, which exits 0")
 	}

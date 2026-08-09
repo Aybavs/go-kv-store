@@ -22,18 +22,13 @@ import (
 	"github.com/aybavs/go-kv-store/internal/engine"
 )
 
-// The end-to-end measurement harness for v0.5.
+// The end-to-end measurement harness. It lives in package server so it can wrap
+// the listener by assigning s.ln, which adds nothing to the production build.
 //
-// It lives in package server rather than in a package of its own so that it can
-// wrap the listener by assigning s.ln, which adds nothing to the production
-// build — no flag, no config field, no nil check on the accept path. The
-// counting conn it installs is next to the code whose syscalls it counts.
-//
-// Everything here is a tool, not a gate. The workload runs only under
-// KV_BENCH=1; a benchmark that CI must pass is a benchmark that will eventually
-// be weakened to keep CI green. The one exception is
-// TestSyscallCounterCountsWhatItClaims, which always runs, because every number
-// the tool produces rests on that counter being right.
+// A tool, not a gate: it runs only under KV_BENCH=1, because a benchmark CI must
+// pass eventually gets weakened to keep CI green. The exception is
+// TestSyscallCounterCountsWhatItClaims, which always runs — every number here
+// rests on that counter.
 
 // benchServer starts a server whose accepted connections are counted. It
 // deliberately does not go through RunWithReady: that would create its own

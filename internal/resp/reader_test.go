@@ -560,20 +560,14 @@ func TestIncompleteFrameIsDistinguishable(t *testing.T) {
 	})
 }
 
-// TestBufferNeverGrowsPastTheCommandLimit pins the property that bounds peak
-// memory rather than the limit itself.
+// TestBufferNeverGrowsPastTheCommandLimit bounds peak memory, not the limit —
+// that is already enforced against the declared length. During a grow both
+// arrays are live.
 //
-// The limit is enforced against the declared length before any payload is read,
-// so a request cannot exceed it. What that check does not bound is the transient
-// during a grow: both arrays are live while the copy runs.
-//
-// The overshoot needs constructing, not approximating. It happens at exactly one
-// place: a payload the size of the whole limit fills the buffer to capacity, and
-// then the CRLF terminating it asks for two bytes more. An unbounded doubling
-// answers that with an array twice the limit, so the peak becomes the limit plus
-// twice the limit — the three times SECURITY.md measured. A first version of
-// this test used a payload comfortably under the limit and passed with the cap
-// removed, because nothing ever overshot.
+// The overshoot has exactly one trigger and has to be constructed: a payload the
+// size of the whole limit fills the buffer, and the CRLF after it asks for two
+// bytes more, which an unbounded doubling answers with twice the limit. A
+// payload under the limit passes with the cap removed.
 func TestBufferNeverGrowsPastTheCommandLimit(t *testing.T) {
 	const limit = 256 << 10
 

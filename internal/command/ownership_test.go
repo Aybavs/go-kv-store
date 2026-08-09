@@ -116,17 +116,13 @@ func TestMGetRepliesDoNotAliasParserBuffer(t *testing.T) {
 	}
 }
 
-// TestOwnedKeysCopies pins the copy itself, because nothing else does.
+// TestOwnedKeysCopies pins the copy, which nothing else does: aliasing the
+// parser buffer here leaves the rest of the suite green.
 //
-// Found by mutation: making ownedKeys alias the parser buffer left the entire
-// suite green. That is not harmless. engine.Delete carries the live keys into
-// aof.DeriveDel, which copies the slice but not the strings inside it, so an
-// aliased key would sit in the write buffer and be encoded by the writer
-// goroutine — possibly after the connection has already read the next command
-// into the same bytes. The AOF would then record a key nobody deleted.
-//
-// The property is tested here rather than through that whole path because it is
-// a property of this function, and testing it here is exact rather than timed.
+// It is not harmless. engine.Delete passes the live keys to aof.DeriveDel, which
+// copies the slice but not the strings in it, so an aliased key could be encoded
+// by the writer goroutine after the connection reused those bytes — recording a
+// key nobody deleted. Pinned on the function because that is exact, not timed.
 func TestOwnedKeysCopies(t *testing.T) {
 	buf := []byte("DELkeyakeyb")
 	parsed := [][]byte{buf[0:3], buf[3:7], buf[7:11]}

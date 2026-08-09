@@ -91,13 +91,8 @@ func (e *Engine) AttachLog(l *aof.Log, p aof.Policy) {
 }
 
 // OpenLog recovers path into this engine's store and then appends to it.
-//
-// Recovery is done here rather than by the caller because the store is not
-// exported: handing it out so that main could replay into it would open the one
-// hole the package spends its whole design closing.
-//
-// The returned Result describes what recovery found. An error means the file
-// could not be trusted, and the caller must not start.
+// Recovery happens here because the store is not exported. An error means the
+// file could not be trusted and the caller must not start.
 func (e *Engine) OpenLog(path string, p aof.Policy, onFatal func(error)) (aof.Result, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -130,16 +125,9 @@ func (e *Engine) Finalize(ctx context.Context) error {
 	return l.Close(ctx)
 }
 
-// commit appends the effect and applies it to memory under one acquisition of
-// the lock, then returns the sequence to wait for. The caller awaits outside
-// the lock — see the mutation methods.
-//
-// The ordering here is Model A: memory becomes visible before the durability
-// acknowledgement. Another client may observe a mutation after its in-memory
-// linearisation point but before the originating client is told it is durable.
-// That is a documented consequence, not an oversight.
-//
-// Must be called with e.mu held.
+// commitSet appends the effect and applies it under one lock acquisition, and
+// returns the sequence the caller awaits outside the lock. Model A ordering;
+// see ADR 0005. Must be called with e.mu held.
 func (e *Engine) commitSet(key, value string, deadline time.Time, hasTTL bool, apply func()) (uint64, error) {
 	if e.log == nil {
 		apply()
@@ -157,10 +145,9 @@ func (e *Engine) commitDel(keys []string, apply func()) (uint64, error) {
 	return e.commit(aof.DeriveDel(keys), apply)
 }
 
-// commit appends and applies. The two wrappers above exist so the record is
-// never built when there is no log to put it in: passing aof.DeriveSet(...) as
-// an argument evaluates it whether or not it is used, and that cost showed up
-// as a 55% regression on EngineSet with persistence switched off.
+// commit appends and applies. The wrappers above exist so a record is never
+// built when there is no log to put it in: an argument is evaluated whether or
+// not the callee uses it, which cost 55% on EngineSet with persistence off.
 func (e *Engine) commit(rec aof.Record, apply func()) (uint64, error) {
 	seq, err := e.log.Append(rec)
 	if err != nil {
@@ -213,16 +200,10 @@ func NewWithClock(onFatal func(error), now func() time.Time) *Engine {
 	}
 }
 
-// readNow supplies the instant expiry is judged against, and skips the clock
-// entirely when no key carries a deadline.
-//
-// This is not a micro-optimisation. Measured on an Apple M4, time.Now costs
-// about 54 ns while the map lookups around it cost about 4 ns, so reading the
-// clock on every GET made the engine read path more than five times slower than
-// v0.1.0 — for a store that might contain no TTLs at all. The zero time is safe
-// as a stand-in: with no deadlines recorded, nothing compares against it.
-//
-// Callers must already hold the lock; len on a map is O(1).
+// readNow is the instant expiry is judged against, and skips the clock when no
+// key carries a deadline — time.Now costs about 54 ns against 4 ns of map work,
+// so reading it per GET made reads five times slower. The zero time is safe
+// with no deadlines recorded. Callers must hold the lock.
 func (e *Engine) readNow() time.Time {
 	if !e.store.HasExpirations() {
 		return time.Time{}
@@ -230,12 +211,9 @@ func (e *Engine) readNow() time.Time {
 	return e.now()
 }
 
-// guard reports a panic in the commit path as a fatal condition; panics do not
-// cross goroutine boundaries in Go, so reporting is what triggers shutdown.
-//
-// It is registered before the unlock, so the lock is released by the time this
-// runs — reporting while holding it would deadlock if onFatal called back into
-// the engine. The cost is that shared state is visible before the report.
+// guard reports a panic in the commit path as fatal; panics do not cross
+// goroutine boundaries, so reporting is what triggers shutdown. Registered
+// before the unlock, so onFatal cannot deadlock against a held lock.
 func (e *Engine) guard() {
 	if r := recover(); r != nil {
 		e.onFatal(fmt.Errorf("engine commit path panic: %v\n%s", r, debug.Stack()))

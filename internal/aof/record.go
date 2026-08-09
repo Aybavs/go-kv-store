@@ -1,15 +1,10 @@
-// Package aof implements the append-only file: the canonical effect records
-// that make crash recovery possible, their encoding, and the file they live in.
+// Package aof implements the append-only file: canonical effect records, their
+// encoding, and the file they live in.
 //
-// The log records the resulting durable state mutation, never the client
-// command. That distinction is the whole design, and ADR-0004 carries the
-// counterexample: a command log makes recovery depend on prior state, so any
-// read-modify-write command silently breaks it. An effect record is independent
-// of every record before it.
-//
-// One consequence is worth stating here because it removes work rather than
-// adding it: active expiration never needs to append anything. A key that
-// expired is already absent on replay, by the rules in replay.go.
+// The log records the resulting state mutation, never the client command, so no
+// record depends on one before it. ADR-0004 carries the counterexample. One
+// consequence removes work: active expiration never appends anything, because
+// an expired key is already absent on replay.
 package aof
 
 import "time"

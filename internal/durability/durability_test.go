@@ -1,38 +1,22 @@
 // Package durability kills a real server process at a random moment and checks
-// what survives.
+// what survives. Everything else here tests recovery against files the test
+// built itself, which only ever produces the tears its author thought of.
 //
-// Everything else in this repository tests recovery against files it built
-// itself: a good file cut at a chosen offset, a hand-written corrupt tail. Those
-// are precise but they only ever produce the tears the test author thought of.
-// This one produces whatever a SIGKILL mid-write actually produces — including
-// partial writes at page boundaries, and buffered records that never reached the
-// file at all.
-//
-// The invariant is what makes it worth the seconds it costs:
+// The invariant:
 //
 //	Under -appendfsync always, every acknowledged write survives the crash,
 //	and the recovered keys are a contiguous prefix of the ones that were sent.
 //
-// A reply is only counted after the server sent it, so a counted write is one
-// the server claimed was durable. If a single one of those is missing after
-// recovery, the durability claim is false.
+// A write is counted only after the server replied, so a counted write is one
+// the server claimed was durable.
 //
-// # What this cannot test, and why
+// # What this cannot test
 //
-// It does not produce torn tails, and no amount of tuning would make it. That
-// was measured rather than assumed: twelve runs with eight concurrent writers
-// and 64 KiB values under everysec, killed at random, produced zero. The reason
-// is structural. Bytes that reached write() are in the page cache and outlive
-// the process, because the kernel completed the syscall; bytes that did not are
-// simply absent, and absent at a record boundary, because the writer delivers
-// batches made of whole records. A torn tail comes from power loss or a kernel
-// panic, which SIGKILL does not simulate.
-//
-// So the repair path is covered deterministically instead, in package aof, by
-// cutting a good file at every byte inside its final record. That is the right
-// division: the case a test can construct exactly is constructed exactly, and
-// this package covers the one it cannot — a real process dying with real state
-// in flight.
+// SIGKILL does not produce torn tails, and no tuning makes it: bytes that
+// reached write() are in the page cache and outlive the process, and bytes that
+// did not are absent at a record boundary. Measured, not assumed — twelve runs
+// under everysec produced zero. The repair path is covered deterministically in
+// package aof instead, by cutting a good file at every byte of its final record.
 package durability
 
 import (
