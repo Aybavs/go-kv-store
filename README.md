@@ -72,7 +72,29 @@ mattered are written down in [docs/design-decisions](docs/design-decisions).
 
 See [docs/architecture.md](docs/architecture.md).
 
+## Install
+
+Prebuilt binaries for linux and darwin on amd64 and arm64 are attached to every
+[release](https://github.com/Aybavs/go-kv-store/releases), with a `SHA256SUMS`
+file beside them. Verify the download before running it:
+
+    curl -sSLO https://github.com/Aybavs/go-kv-store/releases/download/v1.0.0/kv-server_v1.0.0_darwin_arm64.tar.gz
+    curl -sSLO https://github.com/Aybavs/go-kv-store/releases/download/v1.0.0/SHA256SUMS
+    shasum -a 256 --ignore-missing -c SHA256SUMS
+    tar xzf kv-server_v1.0.0_darwin_arm64.tar.gz
+
+`--ignore-missing` matters: `SHA256SUMS` covers all four archives, and without it
+the three you did not download are reported as `FAILED open or read`. On Linux
+the command is `sha256sum --ignore-missing -c SHA256SUMS`.
+
+**What this establishes and what it does not.** The checksums detect a corrupted
+or truncated download. They are not signatures: anyone who could replace the
+archive could replace `SHA256SUMS` alongside it, so this is an integrity check
+against transport, not a proof of provenance.
+
 ## Quick start
+
+From source:
 
     go build -o bin/kv-server ./cmd/kv-server
     ./bin/kv-server --port 6380
