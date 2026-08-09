@@ -6,14 +6,58 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-08-09
+
+Extended commands, and the testing that makes them worth trusting.
+
 ### Added
 
+- `MGET key [key ...]` — one element per key in request order, a null bulk
+  string where the key is absent. Read-only, so it never touches the log
+- `INCR key` and `DECR key`, replying with the value after the change
+- A seeded, bounded command-sequence generator (`internal/cmdgen`) with two
+  consumers: the conformance suite compares each sequence against real Redis
+  step by step, and the engine replays the same sequence out of the append-only
+  file and compares the recovered state against the live one after every step
+- `store.ExpiresAt`, reporting a key's deadline as the absolute instant it is
+- Benchmarks for the new commands, and re-measured end-to-end figures
 - Crash-durability tests that kill a real server process at random moments and
   restart it against the file left on disk, asserting that every acknowledged
   write survives and that the recovered keys form a contiguous prefix
 - ADR-0003, recording why fatal conditions are broadcast by closing a channel
   rather than delivered as a value. The decision dates from v0.1.0 and had gone
   unwritten
+
+### Counter semantics, measured against Redis rather than remembered
+
+**`INCR` and `DECR` preserve an existing expiry exactly**, in memory and in the
+log: the record is `SET key <result> PXAT <the same absolute deadline>`. This is
+the case ADR-0004 was written about — getting the in-memory TTL right while
+logging a `SET` with no expiry passes every test until a crash, and then
+recovery brings the key back without its expiry.
+
+**The incrementable-value grammar is narrower than Go's `strconv.ParseInt`.**
+Redis rejects `+5`, `07`, `00` and `-0`; the standard library accepts all four.
+The parser is written to the measured grammar, and each of the four has a
+conformance scenario.
+
+**Overflow is its own error**, `ERR increment or decrement would overflow`,
+rather than a variant of the not-an-integer error. It is a new class in the
+conformance normaliser; without that, both servers collapse to `other` and every
+overflow scenario passes without comparing anything.
+
+### Fixed
+
+- `INCR` read the clock on every call, including in a store where no key carries
+  a deadline. Reading it only when it can matter — the same rule the read path
+  has followed since v0.2 — took the path from 151 ns to 102 ns
+
+### Notes
+
+- `MSET` remains a non-goal. It cannot be expressed as one canonical append-only
+  record, and one complete record is one recovery atomicity unit
+- 103 handwritten conformance scenarios, up from 59
+
 
 ## [0.3.0] - 2026-08-09
 

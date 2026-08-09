@@ -70,7 +70,12 @@ func (e *Engine) IncrBy(key string, delta int64) (int64, error) {
 		if !e.acceptingMutations {
 			return 0, ErrDraining
 		}
-		now := e.now()
+		// readNow, not now: this path never computes a new deadline, it only
+		// judges liveness and copies the deadline the key already has. So it
+		// can skip the clock entirely when no key carries one, which is worth
+		// about 50 ns on this hardware — the same measurement that made Get
+		// five times faster in v0.2.
+		now := e.readNow()
 
 		var current int64
 		// An expired key is absent to callers, so it is absent here too: the

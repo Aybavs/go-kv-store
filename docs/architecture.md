@@ -147,6 +147,15 @@ once, so everything in that buffer shares the syscall by construction.
 A partial `write()` is treated as the normal contract it is. `writtenSeq` never
 advances past a record that was not delivered whole.
 
+`INCR` and `DECR` are the first commands whose effect depends on the value
+already stored, which is exactly the shape
+[ADR 0004](design-decisions/0004-canonical-effect-logging.md) argues about. Their
+record is `SET key <result> PXAT <deadline>`, and the deadline is read from the
+store as the absolute instant it holds — `store.ExpiresAt` exists for this and
+nothing else. Rebuilding it by adding the *remaining* time to the current instant
+would produce a different number, and in a record a different number is a
+different expiry.
+
 ### Recovery
 
 Three outcomes, and keeping them apart is the policy:
@@ -239,8 +248,31 @@ Each layer is tested at the level where its property is actually visible.
 | Mutation admission under contention | `engine`, concurrent writers against a drain |
 | Shutdown, limits, deadlines | `server`, over real TCP |
 | Command semantics | `conformance`, differentially against real Redis |
+| Interactions no scenario list contains | `cmdgen` sequences, run differentially and through recovery |
 
 The conformance suite is the only one not written against our own expectations,
 which is what makes it worth the dependency on an external server. It compares
 error *class* rather than message text, because the documented contract is the
 class.
+
+### Generated sequences
+
+`internal/cmdgen` produces bounded command sequences from a seed, over four
+keys. Two suites consume them: the conformance suite compares each sequence
+against Redis step by step, and `engine` replays the same sequence out of the
+append-only file and compares the recovered state against the live one.
+
+Two rules keep them from being flaky. A sequence is a pure function of its seed
+— no clock, no global rand, no map iteration — so a divergence is reproducible
+from the seed alone, and the seed list is fixed rather than clock-derived. And
+every generated expiry is at least 100 seconds, because the two servers are
+asked in turn and a short TTL would be comparing the clock rather than the
+implementations. Expiry *transitions* stay in the handwritten scenarios, where
+the wait is deliberate and bounded.
+
+The recovery comparison happens after **every** step rather than once at the
+end, and that was not a stylistic choice. Only 3 of the 64 final key-states
+across the seed list are decided by a TTL-preserving `INCR`; every other key is
+last written by a later `SET`, `DEL` or `EXPIRE` whose record is correct either
+way. An end-state comparison therefore hid the exact defect the suite exists to
+catch.
