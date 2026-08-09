@@ -1,7 +1,7 @@
 # Benchmarks
 
-Micro-benchmarks, current as of v0.4.0. End-to-end throughput and latency
-distributions arrive in v0.5.
+Current as of v0.5.0. Micro-benchmarks, end-to-end throughput, latency
+distributions, and syscalls per command.
 
 Every number here comes from an actual run on the machine named below. Nothing
 is estimated, and nothing is carried over from an earlier version — carrying
@@ -26,40 +26,41 @@ with what it says.
 
 ```
 pkg: github.com/aybavs/go-kv-store/internal/engine
-BenchmarkEngineSet-10                           26613415   42.10 ns/op	       0 B/op	       0 allocs/op
-BenchmarkEngineGet-10                           73244793   16.18 ns/op	       0 B/op	       0 allocs/op
-BenchmarkEngineMGet-10                          11357994   98.74 ns/op	      96 B/op	       1 allocs/op
-BenchmarkEngineIncr-10                          12001899   101.8 ns/op	       7 B/op	       0 allocs/op
-BenchmarkEngineIncrWithTTL-10                    6745112   180.2 ns/op	       7 B/op	       0 allocs/op
-BenchmarkEngineParallelReads-10                 11195404   97.91 ns/op	       0 B/op	       0 allocs/op
-BenchmarkEngineParallelMixed-10                 14981140   78.06 ns/op	       0 B/op	       0 allocs/op
-BenchmarkEngineSetLoggedEverysec-10              1286781   928.3 ns/op	      64 B/op	       2 allocs/op
-BenchmarkEngineSetLoggedAlways-10                1000000   1001 ns/op	      64 B/op	       2 allocs/op
-BenchmarkEngineSetLoggedToDisk-10                    386   3683548 ns/op	      64 B/op	       2 allocs/op
-BenchmarkEngineSetLoggedToDiskParallel-10           1911   753691 ns/op	     100 B/op	       1 allocs/op
+BenchmarkEngineSet-10                           26698110   42.03 ns/op	       0 B/op	       0 allocs/op
+BenchmarkEngineGet-10                           75720728   16.46 ns/op	       0 B/op	       0 allocs/op
+BenchmarkEngineMGet-10                          11651818   102.9 ns/op	      96 B/op	       1 allocs/op
+BenchmarkEngineIncr-10                          12296089   100.8 ns/op	       7 B/op	       0 allocs/op
+BenchmarkEngineIncrWithTTL-10                    6782724   180.3 ns/op	       7 B/op	       0 allocs/op
+BenchmarkEngineParallelReads-10                 12447416   95.83 ns/op	       0 B/op	       0 allocs/op
+BenchmarkEngineParallelMixed-10                 15013527   79.24 ns/op	       0 B/op	       0 allocs/op
+BenchmarkEngineSetLoggedEverysec-10              1294947   918.3 ns/op	      64 B/op	       2 allocs/op
+BenchmarkEngineSetLoggedAlways-10                1206110   992.8 ns/op	      64 B/op	       2 allocs/op
+BenchmarkEngineSetLoggedToDisk-10                    390   3694721 ns/op	      64 B/op	       2 allocs/op
+BenchmarkEngineSetLoggedToDiskParallel-10           1939   752174 ns/op	      99 B/op	       1 allocs/op
 
 pkg: github.com/aybavs/go-kv-store/internal/resp
-BenchmarkReadCommand-10                         11027164   105.6 ns/op	 350.38 MB/s	       0 B/op	       0 allocs/op
-BenchmarkWriteBulk-10                           41480030   28.15 ns/op	       0 B/op	       0 allocs/op
-BenchmarkWriteError-10                          33330092   35.45 ns/op	       0 B/op	       0 allocs/op
+BenchmarkReadCommand-10                         10991577   105.7 ns/op	 350.06 MB/s	       0 B/op	       0 allocs/op
+BenchmarkWriteBulk-10                           41061730   28.45 ns/op	       0 B/op	       0 allocs/op
+BenchmarkWriteError-10                          33230218   34.91 ns/op	       0 B/op	       0 allocs/op
 
 pkg: github.com/aybavs/go-kv-store/internal/store
-BenchmarkStoreSet-10                            84244201   14.14 ns/op	       0 B/op	       0 allocs/op
-BenchmarkStoreSetWithTTL-10                     49243227   24.45 ns/op	       0 B/op	       0 allocs/op
-BenchmarkStoreGetHit-10                        100000000   10.96 ns/op	       0 B/op	       0 allocs/op
-BenchmarkStoreGetHitWithTTL-10                  63959635   18.54 ns/op	       0 B/op	       0 allocs/op
-BenchmarkStoreGetMiss-10                       227094896   5.244 ns/op	       0 B/op	       0 allocs/op
+BenchmarkStoreSet-10                            84306554   14.36 ns/op	       0 B/op	       0 allocs/op
+BenchmarkStoreSetWithTTL-10                     49391607   24.33 ns/op	       0 B/op	       0 allocs/op
+BenchmarkStoreGetHit-10                        100000000   10.72 ns/op	       0 B/op	       0 allocs/op
+BenchmarkStoreGetHitWithTTL-10                  62551718   17.92 ns/op	       0 B/op	       0 allocs/op
+BenchmarkStoreGetMiss-10                       237145050   5.032 ns/op	       0 B/op	       0 allocs/op
 ```
+
 
 ## What the v0.4 commands cost
 
 | | ns/op | allocs |
 |---|---|---|
-| `EngineGet` | 16.2 | 0 |
-| `EngineMGet` (4 keys) | 98.7 | 1 |
-| `EngineSet` | 42.1 | 0 |
-| `EngineIncr` | 101.8 | 0 |
-| `EngineIncrWithTTL` | 180.2 | 0 |
+| `EngineGet` | 16.5 | 0 |
+| `EngineMGet` (4 keys) | 102.9 | 1 |
+| `EngineSet` | 42.0 | 0 |
+| `EngineIncr` | 100.8 | 0 |
+| `EngineIncrWithTTL` | 180.3 | 0 |
 
 `MGET`'s one allocation is the result slice, which is the return value itself
 and not avoidable without handing the caller a buffer to fill.
@@ -83,16 +84,16 @@ last two use a real file with a real `fsync`.
 
 | | ns/op | |
 |---|---|---|
-| `EngineSet` | 41.6 | no log attached |
-| `EngineSetLoggedEverysec` | 947 | + hand off to the writer, wait for `write()` |
-| `EngineSetLoggedAlways` | 1007 | + wait for `Sync()` |
-| `EngineSetLoggedToDisk` | 3 713 027 | a real `fsync` per write |
-| `EngineSetLoggedToDiskParallel` | 755 708 | the same, with writers in flight |
+| `EngineSet` | 42.0 | no log attached |
+| `EngineSetLoggedEverysec` | 918 | + hand off to the writer, wait for `write()` |
+| `EngineSetLoggedAlways` | 993 | + wait for `Sync()` |
+| `EngineSetLoggedToDisk` | 3 694 721 | a real `fsync` per write |
+| `EngineSetLoggedToDiskParallel` | 752 174 | the same, with writers in flight |
 
 Three things are worth reading off this table.
 
 **Most of the in-process cost is a goroutine handoff, not encoding.** Going from
-42 ns to 946 ns is the round trip: append to the buffer, wake the writer, wait
+42 ns to 918 ns is the round trip: append to the buffer, wake the writer, wait
 on a condition variable for the marker to advance. Encoding a record is a small
 part of that.
 
@@ -101,8 +102,8 @@ write to a real file costs about 3.7 ms here. Any reasoning about durability
 that starts from the nanosecond figures is reasoning about the wrong number.
 
 **Group commit is real, and this is the measurement that says so.** The same
-workload with concurrent writers costs 757 µs per operation instead of 3.7 ms —
-about 4.8× — because writers waiting on the same `Sync` share one syscall. Spec
+workload with concurrent writers costs 752 µs per operation instead of 3.7 ms —
+about 4.9× — because writers waiting on the same `Sync` share one syscall. Spec
 §6.6 claims this follows from the construction rather than from a separate
 mechanism; until now nothing checked it.
 
@@ -126,6 +127,78 @@ unlock — without which a panic could leave `onFatal` deadlocked against a held
 lock. Ten nanoseconds on a path that already costs 108 ns to decode its own
 command is not worth that trade, and if end-to-end work in v0.5 ever says
 otherwise, it will say so with a number.
+
+## Syscalls per command, and what v0.5 did about them
+
+ROADMAP named *syscalls per request* as the v0.5 target, so `internal/server`
+grew a harness that counts them directly instead of inferring them from
+throughput. `net.Conn` is an interface, so this needs no production code: a test
+assigns a wrapped listener to the server. Reproduce with:
+
+    make bench-e2e
+
+Configurations run interleaved (A B A B), never in blocks, and the report prints
+the spread beside the median. Latency is per *batch*: at pipeline 1 a batch is
+one command, above 1 the two are different quantities.
+
+### The asymmetry that started it
+
+Measured before anything changed:
+
+| workload | reads/cmd | writes/cmd |
+|---|---|---|
+| request/response | 1.000 | 1.000 |
+| pipeline 8 | 0.125 | **1.000** |
+| pipeline 64 | 0.016 | **1.000** |
+
+Sixty-four commands arrived in one segment and were parsed out of one buffer;
+sixty-four replies left in sixty-four separate writes. The two sides of the same
+connection were an order of magnitude apart.
+
+### After: flush when the reader is about to block
+
+Eleven interleaved repetitions, both behaviours alternating **inside one
+process**. That matters: this machine's end-to-end spread is up to 9%, so two
+runs minutes apart could not separate anything smaller.
+
+| workload | before cmd/s | after cmd/s | writes/cmd |
+|---|---|---|---|
+| GET, 10 conns, pipeline 8 | 322 241 | 732 262 | 1.000 → 0.125 |
+| GET, 10 conns, pipeline 64 | 409 084 | 4 342 347 | 1.000 → 0.016 |
+| GET, 50 conns, pipeline 64 | 397 316 | 5 642 551 | 1.000 → 0.016 |
+| SET, 10 conns, pipeline 64 | 403 802 | 1 937 437 | 1.000 → 0.016 |
+| SET, pipeline 64, `everysec` | 242 294 | 468 605 | 1.000 → 0.016 |
+
+Writes per command now follow reads exactly.
+[ADR 0006](design-decisions/0006-flush-when-the-reader-blocks.md) has the
+mechanism and the alternatives it rules out.
+
+### Request/response, where the claim was that nothing changes
+
+| workload | before | after |
+|---|---|---|
+| GET, 1 conn | 45 424 ±3.5% | 44 919 ±3.9% |
+| GET, 10 conns | 94 030 ±2.3% | 94 373 ±1.2% |
+| GET, 50 conns | 124 898 ±11.2% | 119 943 ±5.7% |
+
+One and ten connections are flat and stable enough to say so.
+
+**Fifty connections is unsettled, and is recorded as unsettled.** Three
+interleaved runs gave −6.5%, −4.0% and +0.2%. The before arm's own spread was
+9–13% in every one of them, which is what makes its median unreliable; measured
+on its own, with only that workload in the process, the two arms matched
+(121 229 against 121 448). The honest statement is that this method cannot
+separate a difference of this size at that concurrency — not that there is none.
+
+### Latency, per batch
+
+| workload | p50 before | p50 after |
+|---|---|---|
+| GET, 10 conns, pipeline 8 | 245 µs | 102 µs |
+| GET, 10 conns, pipeline 64 | 1.571 ms | 133 µs |
+| GET, 50 conns, pipeline 64 | 7.936 ms | 428 µs |
+
+---
 
 ## End to end, and the answer to the sharding question
 
@@ -156,19 +229,30 @@ measurement gets published without a second look.
 
 ### Throughput
 
-| 50 connections | SET rps | GET rps | p50 |
+| 50 connections, no pipelining | SET rps | GET rps | p50 |
 |---|---|---|---|
-| Redis 8.10 | 122 549 | 119 332 | 0.215 ms |
-| go-kv-store | 101 523 | 102 881 | 0.263 ms |
+| Redis 8.10 | 126 263 | 126 263 | 0.207 ms |
+| go-kv-store | 111 982 | 107 875 | 0.239 / 0.255 ms |
 
-| 1 connection | GET rps | p50 |
+| 50 connections, `-P 16` | GET rps | p50 |
 |---|---|---|
-| Redis 8.10 | 36 563 | 0.023 ms |
-| go-kv-store | 35 399 | 0.023 ms |
+| Redis 8.10 | 1 379 310 | 0.471 ms |
+| go-kv-store | 1 550 388 | 0.287 ms |
 
-At one connection the two are within 3% of each other: both are bound by the
-round trip, and our per-request work is not the difference. The gap appears only
-under concurrency, where we reach roughly 83–86% of Redis.
+Without pipelining we reach roughly 85–89% of Redis: both sides pay a syscall
+per command, and Redis's event loop amortises its wakeups better than a
+goroutine per connection does.
+
+**With pipelining the ordering reverses**, consistently across three interleaved
+pairs, at higher throughput and lower p50. That is the v0.5 change showing up
+against an independent client rather than against our own harness.
+
+It is **not** a claim that this implementation is faster than Redis. The two do
+not offer the same feature set or the same durability guarantees, this is one
+workload shape on one machine, and Redis is doing more per command than we are.
+What the row supports is narrower and is the only thing claimed: on a pipelined
+workload, per-request syscalls are no longer the thing holding this server
+back.
 
 **Our run-to-run spread is much wider than Redis's**, and that is worth stating
 rather than hiding behind a median. Across three runs Redis varied by 0.6% on
@@ -200,11 +284,11 @@ Median of three runs each, `GET` over 50 connections:
 
 | GOMAXPROCS | GET rps |
 |---|---|
-| 1 | 124 224 |
-| 2 | 122 249 |
-| 4 | 118 906 |
-| 8 | 116 550 |
-| 10 | 116 279 |
+| 1 | 124 069 |
+| 2 | 123 916 |
+| 4 | 117 925 |
+| 8 | 116 279 |
+| 10 | 114 548 |
 
 Flat, with a slight decline. That single table settles the sharding question on
 its own: the engine's read path costs 4× more per operation at ten cores than at
@@ -215,42 +299,52 @@ entirely.
 
 ### The profile says the same thing more bluntly
 
-Measured at v0.3.0 and kept, per the note at the top of this file: nothing on
-the syscall path changed in v0.4, and the re-measured tables above agree with
-what it says. 300 000 GETs over 50 connections, CPU profile of the server:
+Reproducible now rather than collected by hand:
+
+    make bench-profile
+    go tool pprof -top -nodecount=10 cpu.prof
+
+300 000 GETs over 50 connections without pipelining, before and after v0.5:
 
 ```
-      flat  flat%   cum%
-     3.52s 53.50% 53.50%  syscall.rawsyscalln
-     1.24s 18.84% 72.34%  runtime.pthread_cond_wait
-     1.09s 16.57% 88.91%  runtime.kevent
-     0.39s  5.93% 94.83%  runtime.pthread_cond_signal
-     0.30s  4.56% 99.39%  runtime.usleep
+before                                   after
+ 12.25s 77.88%  syscall.rawsyscalln       12.42s 78.21%  syscall.rawsyscalln
+  1.11s  7.06%  runtime.pthread_cond_wait  1.20s  7.56%  runtime.pthread_cond_wait
+  0.92s  5.85%  runtime.usleep             0.88s  5.54%  runtime.usleep
+  0.79s  5.02%  runtime.kevent             0.78s  4.91%  runtime.kevent
 
-                  28.57%  resp.(*Reader).ReadCommand   → bufio fill → read(2)
-                  24.77%  resp.(*Writer).Flush         → write(2)
+  6.18s 39.29%  bufio.(*Reader).fill  cum  9.34s 58.82%  bufio.(*Reader).fill  cum
+  6.08s 38.65%  bufio.(*Writer).Flush cum
 ```
 
-**`engine`, `store` and the mutex do not appear at all** — not in the top
-fifteen, and below the 0.03s threshold at which nodes were dropped. Around 99%
-of CPU is syscalls and scheduler, split roughly evenly between the read and the
-write that each command costs.
+**`engine`, `store` and the mutex do not appear at all**, three milestones after
+that was first measured, and around 99% of CPU is syscalls and scheduler.
 
-### What this means for v0.5
+**The attribution moved and the total did not, which is worth understanding
+before reading the second column as a regression.** `Flush` no longer appears as
+its own subtree because the flush now happens *inside* the read path, so its
+cost is counted under `fill`. Total syscall time is unchanged (77.9% against
+78.2%) and so is throughput on this workload (118 090 against 116 256 cmd/s,
+inside the spread) — which is the expected result, since a request/response
+client has nothing to batch.
+
+### What this meant for v0.5, and what is left
 
 Sharding is **not** the optimisation to make. ADR-0001 reserved it for the case
 where measurement justified it; measurement says it would address something
-invisible in the profile. That question is now closed with data rather than left
+invisible in the profile. That question is closed with data rather than left
 open with a worry.
 
-The bottleneck is one `read` and one `write` syscall per command. That is also
-why Redis is ahead under concurrency and level with us at one connection: its
-single-threaded event loop does work for many connections per wakeup, while a
-goroutine per connection pays its own syscalls. Reducing syscalls per request is
-the direction — and `docs/architecture.md` already records why the obvious form
-of it is wrong, since `bufio.Reader.Buffered()` cannot tell you whether a
-complete next command is pending and deferring a flush on that signal
-deadlocks. A correct mechanism would need to be something else.
+The bottleneck was one `read` and one `write` syscall per command. **Half of it
+is gone**: a reply is now flushed when the reader is about to block, so a
+pipelined batch costs one write rather than one per command. See the syscalls
+section above and ADR 0006.
+
+The read half remains. A request/response client still costs one read and one
+write per command, and nothing here can batch what a client sends one command at
+a time. Doing better needs something that serves many connections per wakeup —
+an event loop — which would replace the concurrency model this project set out
+to build. It is not a 0.x change and is not on the roadmap.
 
 ## Reads do not scale, and that is the sharding question
 
@@ -260,11 +354,11 @@ it is across core counts:
 
 | cores | reads ns/op | reads M ops/s | mixed ns/op | mixed M ops/s |
 |---|---|---|---|---|
-| 1 | 22.4 | 44.7 | 27.6 | 36.2 |
-| 2 | 68.1 | 14.7 | 52.7 | 19.0 |
-| 4 | 79.8 | 12.5 | 68.5 | 14.6 |
-| 8 | 129.3 | 7.7 | 81.5 | 12.3 |
-| 10 | 107.6 | 9.3 | 88.8 | 11.3 |
+| 1 | 23.0 | 43.5 | 26.8 | 37.3 |
+| 2 | 68.5 | 14.6 | 54.6 | 18.3 |
+| 4 | 75.7 | 13.2 | 62.0 | 16.1 |
+| 8 | 130.1 | 7.7 | 80.9 | 12.4 |
+| 10 | 97.3 | 10.3 | 76.3 | 13.1 |
 
 **Total throughput falls as cores are added.** Going from one core to two costs
 3.0×. This is a property of `sync.RWMutex`, not a defect here: `RLock`
@@ -280,12 +374,12 @@ this table describes a real property of `sync.RWMutex` that a real request never
 gets near. ADR-0001 reserved sharding for the case where profiling justified it;
 the profiling exists now and does not.
 
-One observation worth carrying into v0.5 rather than explaining away here: the
-mixed workload is *faster* than the pure-read one above two cores, which is
-counter-intuitive when it holds an exclusive lock a tenth of the time. A
-plausible reason is that a writer parks readers instead of leaving them
-contending on the shared counter, but that is a hypothesis and has not been
-measured.
+One observation recorded rather than explained away: the mixed workload is
+*faster* than the pure-read one above two cores, which is counter-intuitive when
+it holds an exclusive lock a tenth of the time. A plausible reason is that a
+writer parks readers instead of leaving them contending on the shared counter,
+but that is a hypothesis and it has still not been measured. It survives into
+v1.0 as an open question, not as an explanation.
 
 ## A measurement error in the benchmarks themselves
 
@@ -312,4 +406,5 @@ before the timer starts.
   reproducible to the last percent. Re-run before drawing a conclusion from a
   difference smaller than the run-to-run spread — measured at up to 9% for the
   end-to-end figures on this machine, and a few percent for the in-process
-  ones.
+  ones. The harness prints that spread next to every median so the comparison
+  does not have to be made from memory.

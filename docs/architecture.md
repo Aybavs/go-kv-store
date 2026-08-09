@@ -44,11 +44,23 @@ shared by `server`. Rules that must hold:
 4. The command returns a plain-Go `Reply`; the server encodes it as RESP and
    flushes.
 
-Each completed response is flushed on its own. Batching is deliberately not
-attempted: `bufio.Reader.Buffered()` cannot tell you whether a *complete* next
-command is pending, and deferring a flush on that signal can deadlock — the
-decoder blocks on an incomplete frame while the client waits for a reply still
-sitting in our writer.
+A response is not flushed as soon as it is encoded. It is flushed immediately
+before the reader issues a blocking read, which is the one moment at which
+holding it would be wrong.
+
+The distinction matters and the obvious version of it is a deadlock.
+`bufio.Reader.Buffered()` says bytes are pending, not that a *complete* next
+command is — defer on that signal and the decoder blocks on a half-arrived frame
+while the client waits for a reply still sitting in our writer. So nothing here
+decides whether a command is complete. The reader running out of buffered bytes
+*is* the condition, and it reports it by asking for more.
+
+A request/response client is therefore unaffected: its buffer is empty after
+every command, so the flush lands where it always did. A pipelined batch costs
+one write instead of one per command — measured at 1.000 writes per command
+before and 0.016 after, on a 64-deep pipeline.
+[ADR 0006](design-decisions/0006-flush-when-the-reader-blocks.md) records the
+rejected alternatives and what the change required on the shutdown path.
 
 ## Reply framing
 
@@ -248,6 +260,7 @@ Each layer is tested at the level where its property is actually visible.
 | Mutation admission under contention | `engine`, concurrent writers against a drain |
 | Shutdown, limits, deadlines | `server`, over real TCP |
 | Command semantics | `conformance`, differentially against real Redis |
+| Syscalls per command | `server`, counted directly by a wrapped listener |
 | Interactions no scenario list contains | `cmdgen` sequences, run differentially and through recovery |
 
 The conformance suite is the only one not written against our own expectations,

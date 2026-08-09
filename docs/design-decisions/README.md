@@ -10,3 +10,4 @@ what was rejected, and what the choice costs.
 | [0003](0003-fatal-conditions-are-broadcast.md) | Fatal conditions are broadcast, not delivered |
 | [0004](0004-canonical-effect-logging.md) | Log canonical effects, not client commands |
 | [0005](0005-model-a-durability.md) | Memory becomes visible before the durability acknowledgement |
+| [0006](0006-flush-when-the-reader-blocks.md) | Flush a reply when the reader is about to block |
