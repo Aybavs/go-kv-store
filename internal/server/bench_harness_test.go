@@ -503,7 +503,8 @@ func TestPipelinedBatchCostsOneWrite(t *testing.T) {
 	// has to block part-way through; anything near the batch size means the
 	// replies are not being coalesced at all.
 	if got := counter.writes.Load(); got > 2 {
-		t.Errorf("writes = %d for a batch of %d, want 1 (2 tolerated for a split send)", got, batch)
+		t.Errorf("writes = %d for a batch of %d, want 1 (2 tolerated for a split send); bytes written = %d, reads = %d",
+			got, batch, counter.bytesWritten.Load(), counter.reads.Load())
 	}
 	if got := counter.writes.Load(); got == 0 {
 		t.Error("writes = 0; the replies never left the server")
@@ -544,7 +545,11 @@ func TestFlushEveryReplyCostsOneWritePerReply(t *testing.T) {
 		}
 	}
 
+	// bytesWritten distinguishes the two ways this can go wrong: a total of
+	// batch*len(reply) with fewer writes means replies were coalesced, while a
+	// smaller total means a write went unseen.
 	if got := counter.writes.Load(); got != batch {
-		t.Errorf("writes = %d, want exactly %d with the deferral off", got, batch)
+		t.Errorf("writes = %d, want exactly %d with the deferral off (bytes written = %d, reads = %d)",
+			got, batch, counter.bytesWritten.Load(), counter.reads.Load())
 	}
 }
