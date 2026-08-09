@@ -6,6 +6,15 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.0.1] - 2026-08-09
+
+**No change to server behaviour.** Every production file is identical to v1.0.0
+at the AST level — verified by reparsing all eight without comments and
+comparing the printed syntax tree. If v1.0.0 is running, there is no reason to
+upgrade.
+
+What changed is the tests and the comments.
+
 ### Added
 
 - `INCR`'s atomicity and `MGET`'s single-snapshot property are pinned by tests.
