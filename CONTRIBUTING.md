@@ -48,6 +48,28 @@ from the clock would report failures nobody could reproduce.
 
     make bench
 
+### End-to-end measurement
+
+The micro-benchmarks measure operations in isolation. The end-to-end harness
+measures the server with real clients over real sockets, and reports the figure
+v0.5 is about — **syscalls per command** — counted directly rather than inferred
+from throughput.
+
+    make bench-e2e                       # 5 repetitions, interleaved
+    KV_BENCH=1 KV_BENCH_REPS=3 go test ./internal/server/ -run TestBenchEndToEnd -v
+
+    make bench-profile                   # writes cpu.prof
+    go tool pprof -top -nodecount=15 cpu.prof
+
+It runs only under `KV_BENCH=1`, and CI does not run it. A benchmark CI must
+pass is a benchmark that eventually gets weakened to keep CI green. One test in
+that file does always run — `TestSyscallCounterCountsWhatItClaims` — because
+every number the harness reports rests on the counter being right.
+
+Configurations are interleaved rather than run in blocks, and the report prints
+the spread beside the median. A difference smaller than the spread is not
+separable from noise on that machine, and saying so is a result.
+
 Never publish benchmark numbers that were not actually produced, and always
 record the environment alongside them.
 
