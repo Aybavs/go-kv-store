@@ -107,3 +107,10 @@ func (w *Writer) crlf() error {
 }
 
 func (w *Writer) Flush() error { return w.bw.Flush() }
+
+// Buffered reports how many encoded bytes are waiting for a Flush.
+//
+// It exists so a caller deferring its flush can skip the call when there is
+// nothing to send. That matters because the skip avoids a syscall, which is the
+// quantity the deferral is there to reduce in the first place.
+func (w *Writer) Buffered() int { return w.bw.Buffered() }

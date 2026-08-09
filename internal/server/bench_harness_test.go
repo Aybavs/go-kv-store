@@ -10,6 +10,7 @@ import (
 	"runtime/pprof"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -39,8 +40,16 @@ import (
 // listener, and this needs to supply one.
 func benchServer(t testing.TB, policy string) (addr string, counter *connCounter, stop func()) {
 	t.Helper()
+	return benchServerWith(t, policy, nil)
+}
+
+func benchServerWith(t testing.TB, policy string, mutate func(*Config)) (addr string, counter *connCounter, stop func()) {
+	t.Helper()
 
 	cfg := DefaultConfig()
+	if mutate != nil {
+		mutate(&cfg)
+	}
 	sup := NewSupervisor()
 	eng := engine.New(sup.Fatal)
 
@@ -94,7 +103,10 @@ type workload struct {
 	pipeline int
 	commands int // total across all connections
 	policy   string
-	command  func(i int) (string, []interface{})
+	// flushEveryReply selects the pre-v0.5 behaviour, so the two can be
+	// compared inside one process rather than across two commits minutes apart.
+	flushEveryReply bool
+	command         func(i int) (string, []interface{})
 }
 
 func getWorkload(name string, conns, pipeline, commands int, policy string) workload {
@@ -132,7 +144,7 @@ type result struct {
 // report says so rather than leaving a reader to assume.
 func run(t testing.TB, w workload) result {
 	t.Helper()
-	addr, counter, stop := benchServer(t, w.policy)
+	addr, counter, stop := benchServerWith(t, w.policy, func(c *Config) { c.flushEveryReply = w.flushEveryReply })
 	defer stop()
 
 	perConn := w.commands / w.conns
@@ -366,6 +378,59 @@ func TestBenchEndToEnd(t *testing.T) {
 	report(t, runInterleaved(t, reps, ws), ws)
 }
 
+// TestBenchFlushComparison is the A/B the milestone turns on: the same workload
+// with the deferred flush on and off, interleaved inside one process.
+//
+// Interleaving is not a nicety here. v0.4 measured this machine's end-to-end
+// spread at up to 9%, so two runs minutes apart cannot separate a change worth
+// less than that. Alternating them inside one process makes the pair share
+// whatever the machine was doing.
+func TestBenchFlushComparison(t *testing.T) {
+	if os.Getenv("KV_BENCH") != "1" {
+		t.Skip("set KV_BENCH=1 to run the end-to-end measurement harness")
+	}
+	reps := 5
+	if raw := os.Getenv("KV_BENCH_REPS"); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n <= 0 {
+			t.Fatalf("KV_BENCH_REPS=%q is not a positive number", raw)
+		}
+		reps = n
+	}
+
+	bases := []workload{
+		getWorkload("get/1conn/nopipe", 1, 1, 2000, "none"),
+		getWorkload("get/10conn/nopipe", 10, 1, 20000, "none"),
+		getWorkload("get/50conn/nopipe", 50, 1, 50000, "none"),
+		getWorkload("get/10conn/pipe8", 10, 8, 20000, "none"),
+		getWorkload("get/10conn/pipe64", 10, 64, 20000, "none"),
+		getWorkload("get/50conn/pipe64", 50, 64, 50000, "none"),
+		setWorkload("set/10conn/pipe64", 10, 64, 20000, "none"),
+		setWorkload("set/10conn/pipe64/everysec", 10, 64, 20000, "everysec"),
+	}
+	if os.Getenv("KV_BENCH_ONLY") != "" {
+		var kept []workload
+		for _, b := range bases {
+			if strings.Contains(b.name, os.Getenv("KV_BENCH_ONLY")) {
+				kept = append(kept, b)
+			}
+		}
+		bases = kept
+	}
+
+	var ws []workload
+	for _, base := range bases {
+		before := base
+		before.name = base.name + " [before]"
+		before.flushEveryReply = true
+		after := base
+		after.name = base.name + " [after]"
+		ws = append(ws, before, after)
+	}
+
+	report(t, runInterleaved(t, reps, ws), ws)
+}
+
 // TestBenchProfile writes a CPU profile of one workload, so the profile in
 // docs/benchmarks.md is reproducible by a command rather than collected by hand.
 func TestBenchProfile(t *testing.T) {
@@ -391,4 +456,100 @@ func TestBenchProfile(t *testing.T) {
 
 	fmt.Printf("\nprofile written to %s\n  %.0f cmd/s, %.3f reads/cmd, %.3f writes/cmd\n\n",
 		path, r.throughput, r.readsPerCmd, r.writesPerCmd)
+}
+
+// TestPipelinedBatchCostsOneWrite is the property v0.5 exists to produce, and
+// the counter is what makes it a fact rather than an inference.
+//
+// The client sends every command before reading any reply, so they arrive in
+// one segment, are parsed out of one buffer, and the reader never asks for more
+// until the batch is exhausted. One write should carry all sixty-four replies.
+func TestPipelinedBatchCostsOneWrite(t *testing.T) {
+	const batch = 64
+	addr, counter, stop := benchServer(t, "none")
+	defer stop()
+
+	conn, err := redis.Dial("tcp", addr, redis.DialConnectTimeout(5*time.Second))
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+
+	if _, err := conn.Do("SET", "k", "v"); err != nil {
+		t.Fatalf("warmup: %v", err)
+	}
+	counter.reset()
+
+	for i := 0; i < batch; i++ {
+		if err := conn.Send("GET", "k"); err != nil {
+			t.Fatalf("send %d: %v", i, err)
+		}
+	}
+	if err := conn.Flush(); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
+	for i := 0; i < batch; i++ {
+		got, err := redis.String(conn.Receive())
+		if err != nil {
+			t.Fatalf("receive %d: %v", i, err)
+		}
+		if got != "v" {
+			t.Fatalf("reply %d = %q, want %q", i, got, "v")
+		}
+	}
+
+	// One write for the whole batch. Allowing a couple covers the case where
+	// the client's send is split across segments and the reader legitimately
+	// has to block part-way through; anything near the batch size means the
+	// replies are not being coalesced at all.
+	if got := counter.writes.Load(); got > 2 {
+		t.Errorf("writes = %d for a batch of %d, want 1 (2 tolerated for a split send); bytes written = %d, reads = %d",
+			got, batch, counter.bytesWritten.Load(), counter.reads.Load())
+	}
+	if got := counter.writes.Load(); got == 0 {
+		t.Error("writes = 0; the replies never left the server")
+	}
+}
+
+// The same batch with the deferral switched off must still cost one write per
+// reply. This pins that the switch the harness measures against actually
+// switches something, so an interleaved A/B comparison is not measuring one
+// configuration twice.
+func TestFlushEveryReplyCostsOneWritePerReply(t *testing.T) {
+	const batch = 64
+	addr, counter, stop := benchServerWith(t, "none", func(c *Config) { c.flushEveryReply = true })
+	defer stop()
+
+	conn, err := redis.Dial("tcp", addr, redis.DialConnectTimeout(5*time.Second))
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+
+	if _, err := conn.Do("SET", "k", "v"); err != nil {
+		t.Fatalf("warmup: %v", err)
+	}
+	counter.reset()
+
+	for i := 0; i < batch; i++ {
+		if err := conn.Send("GET", "k"); err != nil {
+			t.Fatalf("send %d: %v", i, err)
+		}
+	}
+	if err := conn.Flush(); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
+	for i := 0; i < batch; i++ {
+		if _, err := conn.Receive(); err != nil {
+			t.Fatalf("receive %d: %v", i, err)
+		}
+	}
+
+	// bytesWritten distinguishes the two ways this can go wrong: a total of
+	// batch*len(reply) with fewer writes means replies were coalesced, while a
+	// smaller total means a write went unseen.
+	if got := counter.writes.Load(); got != batch {
+		t.Errorf("writes = %d, want exactly %d with the deferral off (bytes written = %d, reads = %d)",
+			got, batch, counter.bytesWritten.Load(), counter.reads.Load())
+	}
 }

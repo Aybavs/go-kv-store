@@ -51,16 +51,29 @@ type countingConn struct {
 	counter *connCounter
 }
 
+// The call is counted before it is made, not after, and that ordering is
+// load-bearing rather than stylistic.
+//
+// Counting afterwards leaves a window in which the client has the reply but the
+// counter does not yet know about the write that delivered it. A test that
+// reads the counter as soon as its last reply arrives can therefore observe one
+// write fewer than actually happened. That is not hypothetical: it is what CI
+// on Linux reported — 63 writes for a batch of 64 — while macOS passed
+// consistently, because there the server usually finished the whole batch
+// before the client's first read returned, so the window never opened.
+//
+// Counting first closes it by construction: bytes cannot reach the client
+// before the write that carries them has been counted.
 func (c *countingConn) Read(p []byte) (int, error) {
-	n, err := c.Conn.Read(p)
 	c.counter.reads.Add(1)
+	n, err := c.Conn.Read(p)
 	c.counter.bytesRead.Add(int64(n))
 	return n, err
 }
 
 func (c *countingConn) Write(p []byte) (int, error) {
-	n, err := c.Conn.Write(p)
 	c.counter.writes.Add(1)
+	n, err := c.Conn.Write(p)
 	c.counter.bytesWritten.Add(int64(n))
 	return n, err
 }
