@@ -50,6 +50,11 @@ func TestDocumentedErrorClassesAreProduced(t *testing.T) {
 			want:  "ERR increment or decrement would overflow",
 			steps: [][]string{{"SET", "k", "9223372036854775807"}, {"INCR", "k"}},
 		},
+		{
+			class: "invalid cursor",
+			want:  "ERR invalid cursor",
+			steps: [][]string{{"SCAN", "not-a-cursor"}},
+		},
 	}
 
 	for _, tc := range tests {
