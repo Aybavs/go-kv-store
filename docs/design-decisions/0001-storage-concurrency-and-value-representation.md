@@ -51,3 +51,22 @@ construction. Revisit only on profiling evidence of allocation or GC pressure.
 - The engine boundary is also the fatal-panic boundary: a panic inside the
   commit path invalidates shared-state assumptions and is reported to the
   supervisor rather than recovered.
+
+## Measured outcome (v0.3.0)
+
+The escalation path above was left open for the case where measurement justified
+it. It has now been measured, and it does not.
+
+End-to-end throughput is flat across `GOMAXPROCS` from 1 to 10, and a CPU
+profile of the server under 300 000 GETs over 50 connections does not contain
+`engine`, `store` or the mutex anywhere — they fall below the threshold at which
+profile nodes are dropped. Roughly 99% of CPU is syscalls and scheduling.
+
+The lock does anti-scale in isolation: a pure read loop sustains 43 M ops/s on
+one core and 10 M across ten, because `RLock` contends on a shared counter. But
+the server serves under 100 K requests per second, so that contention is around
+1% of what the engine could deliver even at its worst, and invisible against the
+two syscalls each request costs.
+
+**Sharding is therefore not a v1.0 item, and this is no longer a judgement
+call.** See `docs/benchmarks.md` for the numbers.

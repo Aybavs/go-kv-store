@@ -34,8 +34,14 @@ transactions and additional data types are explicit non-goals.
 ## v0.5 — Performance
 
 - [ ] End-to-end benchmarks with latency distributions
-- [ ] `pprof`-driven optimisation
+- [ ] `pprof`-driven optimisation — the target is **syscalls per request**, not
+      lock contention. Measured at v0.3.0: ~99% of CPU is syscalls and
+      scheduling, and the engine lock does not appear in the profile at all
 - [ ] `docs/benchmarks.md` with reproducible results
+
+Sharding is **not** on this list. ADR-0001 reserved it for the case where
+measurement justified it, and the measurement says it would address something
+invisible in the profile.
 
 ## v1.0 — Stable
 
