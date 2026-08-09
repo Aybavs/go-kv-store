@@ -576,3 +576,96 @@ func TestMGetBinaryKeys(t *testing.T) {
 		t.Fatalf("got %+v; a binary key must be distinct from its truncation", got)
 	}
 }
+
+func TestIncrAndDecr(t *testing.T) {
+	r, _ := newTestRegistry(t)
+
+	if got := r.Dispatch(args("INCR", "n")); got.Kind != ReplyInt || got.Int != 1 {
+		t.Fatalf("INCR on a missing key = %+v, want :1", got)
+	}
+	if got := r.Dispatch(args("INCR", "n")); got.Int != 2 {
+		t.Fatalf("INCR = %+v, want :2", got)
+	}
+	if got := r.Dispatch(args("DECR", "n")); got.Int != 1 {
+		t.Fatalf("DECR = %+v, want :1", got)
+	}
+	if got := r.Dispatch(args("DECR", "fresh")); got.Int != -1 {
+		t.Fatalf("DECR on a missing key = %+v, want :-1", got)
+	}
+	// The result is an ordinary string value afterwards.
+	if got := r.Dispatch(args("GET", "n")); got.Kind != ReplyBulk || got.Str != "1" {
+		t.Fatalf("GET after INCR/DECR = %+v, want bulk \"1\"", got)
+	}
+}
+
+// The reply for a non-numeric value must be the value error, not the internal
+// error mutationError's default arm would produce. This test fails if the
+// mapping in incrBy is ever removed.
+func TestIncrOnNonIntegerIsNotAnInternalError(t *testing.T) {
+	r, _ := newTestRegistry(t)
+	r.Dispatch(args("SET", "k", "abc"))
+
+	got := r.Dispatch(args("INCR", "k"))
+	if got.Kind != ReplyError {
+		t.Fatalf("INCR on %q = %+v, want an error", "abc", got)
+	}
+	if got.Str == "ERR internal error" {
+		t.Fatal("INCR on a non-numeric value answered with the internal error")
+	}
+	if got.Str != errNotAnInteger {
+		t.Fatalf("INCR error = %q, want %q", got.Str, errNotAnInteger)
+	}
+}
+
+func TestIncrOverflowHasItsOwnMessage(t *testing.T) {
+	r, _ := newTestRegistry(t)
+	r.Dispatch(args("SET", "k", "9223372036854775807"))
+
+	got := r.Dispatch(args("INCR", "k"))
+	if got.Kind != ReplyError || got.Str != errIncrOverflow {
+		t.Fatalf("INCR at the int64 boundary = %+v, want %q", got, errIncrOverflow)
+	}
+	if got.Str == errNotAnInteger {
+		t.Fatal("overflow was collapsed into the not-an-integer class")
+	}
+}
+
+// The four forms Go's strconv accepts and Redis does not, exercised through the
+// command layer so a future refactor cannot quietly route INCR back to ParseInt.
+func TestIncrRejectsWhatRedisRejects(t *testing.T) {
+	for _, value := range []string{"+5", "07", "00", "-0", " 5", "5 ", "", "3.0"} {
+		t.Run(strconv.Quote(value), func(t *testing.T) {
+			r, _ := newTestRegistry(t)
+			r.Dispatch(args("SET", "k", value))
+			if got := r.Dispatch(args("INCR", "k")); got.Kind != ReplyError || got.Str != errNotAnInteger {
+				t.Fatalf("INCR on %q = %+v, want %q", value, got, errNotAnInteger)
+			}
+		})
+	}
+}
+
+func TestIncrDecrWrongArity(t *testing.T) {
+	r, _ := newTestRegistry(t)
+	for _, a := range [][]string{{"INCR"}, {"DECR"}, {"INCR", "a", "b"}, {"DECR", "a", "b"}} {
+		got := r.Dispatch(args(a...))
+		want := "ERR wrong number of arguments for '" + strings.ToLower(a[0]) + "' command"
+		if got.Kind != ReplyError || got.Str != want {
+			t.Errorf("%v = %+v, want %q", a, got, want)
+		}
+	}
+}
+
+// INCR preserves an existing TTL. The engine test pins the logged deadline; this
+// one pins what a client sees.
+func TestIncrPreservesTTLThroughTheCommandLayer(t *testing.T) {
+	r, _ := newTestRegistry(t)
+	r.Dispatch(args("SET", "k", "5", "EX", "100"))
+
+	if got := r.Dispatch(args("INCR", "k")); got.Int != 6 {
+		t.Fatalf("INCR = %+v, want :6", got)
+	}
+	got := r.Dispatch(args("TTL", "k"))
+	if got.Kind != ReplyInt || got.Int <= 0 {
+		t.Fatalf("TTL after INCR = %+v, want a positive number of seconds", got)
+	}
+}

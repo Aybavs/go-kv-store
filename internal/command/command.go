@@ -39,6 +39,8 @@ func New(e *engine.Engine) *Registry {
 	r.cmds["MGET"] = spec{minArgs: 2, maxArgs: -1, run: cmdMGet}
 	r.cmds["DEL"] = spec{minArgs: 2, maxArgs: -1, run: cmdDel}
 	r.cmds["EXISTS"] = spec{minArgs: 2, maxArgs: -1, run: cmdExists}
+	r.cmds["INCR"] = spec{minArgs: 2, maxArgs: 2, run: cmdIncr}
+	r.cmds["DECR"] = spec{minArgs: 2, maxArgs: 2, run: cmdDecr}
 	r.cmds["EXPIRE"] = spec{minArgs: 3, maxArgs: 3, run: cmdExpire}
 	r.cmds["TTL"] = spec{minArgs: 2, maxArgs: 2, run: cmdTTL}
 	r.cmds["PERSIST"] = spec{minArgs: 2, maxArgs: 2, run: cmdPersist}
@@ -110,6 +112,9 @@ const (
 const (
 	errNotAnInteger = "ERR value is not an integer or out of range"
 	errSyntax       = "ERR syntax error"
+	// Redis keeps this apart from errNotAnInteger, and so do we: the stored
+	// value is well formed and only the arithmetic is impossible.
+	errIncrOverflow = "ERR increment or decrement would overflow"
 )
 
 func invalidExpire(command string) Reply {
@@ -180,6 +185,29 @@ func cmdSet(e *engine.Engine, args [][]byte) Reply {
 		return mutationError(err)
 	}
 	return Simple("OK")
+}
+
+func cmdIncr(e *engine.Engine, args [][]byte) Reply { return incrBy(e, args, 1) }
+func cmdDecr(e *engine.Engine, args [][]byte) Reply { return incrBy(e, args, -1) }
+
+// incrBy is the shared body of INCR and DECR, which differ only in the sign.
+//
+// The two value errors are mapped here rather than in mutationError because
+// they are not mutation failures: the server is healthy and the request is
+// answerable. Falling through to mutationError's default would answer an
+// ordinary INCR on a non-numeric string with "ERR internal error".
+func incrBy(e *engine.Engine, args [][]byte, delta int64) Reply {
+	n, err := e.IncrBy(string(args[1]), delta)
+	switch {
+	case err == nil:
+		return Int(n)
+	case errors.Is(err, engine.ErrNotAnInteger):
+		return Err(errNotAnInteger)
+	case errors.Is(err, engine.ErrIncrOverflow):
+		return Err(errIncrOverflow)
+	default:
+		return mutationError(err)
+	}
 }
 
 // cmdExpire attaches a deadline. A non-positive value deletes the key outright

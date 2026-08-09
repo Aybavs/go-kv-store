@@ -147,3 +147,36 @@ func TestOwnedKeysCopies(t *testing.T) {
 		}
 	}
 }
+
+// INCR is the second command that stores a key taken from the request, and the
+// first whose value the engine builds rather than the client. Both halves are
+// checked: the key must survive the buffer being reused, and the stored value
+// must not alias anything the parser owns.
+func TestIncrDoesNotAliasParserBuffer(t *testing.T) {
+	e := engine.New(func(err error) { t.Errorf("unexpected fatal: %v", err) })
+	r := New(e)
+
+	frame := "*2\r\n$4\r\nINCR\r\n$7\r\ncounter\r\n"
+	reader := resp.NewReader(bytes.NewReader([]byte(frame)), resp.DefaultLimits())
+	parsed, err := reader.ReadCommand()
+	if err != nil {
+		t.Fatalf("ReadCommand: %v", err)
+	}
+	if reply := r.Dispatch(parsed); reply.Kind != ReplyInt || reply.Int != 1 {
+		t.Fatalf("INCR failed: %+v", reply)
+	}
+
+	for i := range parsed {
+		for j := range parsed[i] {
+			parsed[i][j] = 'X'
+		}
+	}
+
+	got, ok := e.Get("counter")
+	if !ok {
+		t.Fatal("the key vanished after the parser buffer was overwritten")
+	}
+	if got != "1" {
+		t.Fatalf("stored value = %q, want %q", got, "1")
+	}
+}
