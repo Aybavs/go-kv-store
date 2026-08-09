@@ -47,10 +47,16 @@ Sharding is **not** on this list. ADR-0001 reserved it for the case where
 measurement justified it, and the measurement says it would address something
 invisible in the profile.
 
-## v1.0 — Stable
+## v1.0 — Stable ✅
 
-- [ ] Documentation audit
-- [ ] Release binaries
+- [x] A stated compatibility contract, and tests that hold it: the flag surface,
+      the append-only file format, and the documented error classes
+- [x] Documentation audit — claims verified against behaviour rather than re-read
+- [x] Release binaries for linux and darwin on amd64 and arm64, with checksums
+      and instructions for verifying a download
+
+From 1.0 the scope below is permanent rather than a milestone artefact: these
+are decisions about what this program is, not work that is outstanding.
 
 ## Explicit non-goals
 

@@ -6,32 +6,62 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-### Changed
+## [1.0.0] - 2026-08-09
 
-- The decode buffer no longer grows past `-max-command-bytes`. Doubling used to
-  overshoot the limit on the last growth of a maximum-sized command, so peak
-  memory was the limit plus twice the limit. Measured filling a 128 MiB limit,
-  five interleaved pairs: peak RSS 648 MB before, 519 MB after
-- GitHub Actions moved to their current majors, clearing a Node 20 deprecation
-  notice that had annotated every run since v0.1.0
+**The contract is stable.** That is what this release means, and it is a smaller
+claim than "complete" — the limitations in the README are all still true.
+
+### The compatibility promise
+
+From 1.0, every `1.x` is compatible with every other in five respects: the
+documented **command set and reply shapes**, the **error classes**, **flag names
+and their defaults**, **append-only file format version 1**, and **process exit
+codes**.
+
+Deliberately not covered: exact error message text, log output, performance
+figures, and the packages under `internal/` — which are not importable, so there
+is no Go API here to stabilise. [ADR-0007] has the reasoning, both rejected
+alternatives, and what a 2.0 would be for.
+
+Three of the five are held by tests rather than by intent, so a rename, a changed
+default or a format bump fails the build instead of reaching a user:
+
+- the flag surface — every name and every default
+- the file format — a committed fixture, replayed by the current reader
+- the error classes — the exact strings, in one table
+
+### Added
+
+- ADR-0007, and a Compatibility section in the README
+- Install instructions that verify a download, including the `--ignore-missing`
+  that `SHA256SUMS` needs and a plain statement that checksums are not signatures
+- The decode buffer no longer grows past `-max-command-bytes`: peak memory
+  filling a 128 MiB limit went from 648 MB to 519 MB
+- GitHub Actions on their current majors, clearing a Node 20 deprecation notice
+  that had annotated every run since v0.1.0
 
 ### Fixed
 
+- The six shutdown behaviours the design spec enumerates and the suite did not
+  cover. Two were error paths nothing had ever executed — `ErrShutdownTimeout`,
+  and the branch reporting a finalisation failure — and both decide the exit code
 - The durability suite registers its server teardown where the process is
-  created, so a `t.Fatalf` between starting a server and killing it can no
-  longer leave one behind
+  created, so an abort between starting and killing one cannot leave it behind
 
 ### Documentation
 
-- Two questions `docs/benchmarks.md` had left open are now measured and closed.
-  The v0.5.0 throughput difference at fifty connections without pipelining does
-  not exist — fifteen repetitions put the medians within 1.2%, and the arm that
-  looked slower simply has a 63% spread against the other's 16%. Deferring the
-  flush turns out to make throughput four times more predictable at that
-  concurrency, which is a result the medians were hiding
-- The mixed-workload observation carried since v0.2 is no longer a hypothesis.
-  Sweeping the write fraction shows throughput is not monotonic in it: fastest
-  at roughly one write in ten, slower with none, and collapsing at one in two
+- Claims audited against behaviour rather than re-read. `docs/architecture.md`
+  described shipped work in the future tense; the example client claimed to
+  exercise every command and exercised six of eleven; the limitations list
+  omitted that **the append-only file is never rewritten and grows without
+  bound** — measured at 243 KB for one live key written 6 000 times
+- Two open measurement questions closed. The v0.5.0 throughput difference at
+  fifty connections does not exist (medians within 1.2%; the arm that looked
+  slower has a 63% spread against 16%), and the mixed-workload observation
+  carried since v0.2 is no longer a hypothesis — throughput is not monotonic in
+  the write fraction
+
+[ADR-0007]: docs/design-decisions/0007-what-v1-stabilises.md
 
 ## [0.5.0] - 2026-08-09
 
