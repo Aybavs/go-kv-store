@@ -17,6 +17,23 @@ checked against real Redis.
 **What it is not:** a Redis replacement. Single node, strings only, no
 authentication, no TLS. See [Limitations](#limitations).
 
+## Compatibility
+
+From 1.0, every `1.x` release is compatible with every other in five respects:
+the documented **command set and reply shapes**, the **error classes** in
+[docs/protocol.md](docs/protocol.md), **flag names and their defaults**,
+**append-only file format version 1**, and **process exit codes**.
+
+Deliberately not covered: exact error message text (the class is the contract,
+the wording exists to be read), log output, performance figures, and the Go
+packages under `internal/` — which are not importable, so there is no API here
+to stabilise.
+
+Three of those five are pinned by tests rather than by intent, so a rename, a
+changed default or a format bump fails the build instead of reaching you.
+[ADR 0007](docs/design-decisions/0007-what-v1-stabilises.md) has the reasoning
+and what a 2.0 would be for.
+
 ## Why
 
 Because "I used Redis" and "I know how Redis works" are different sentences.

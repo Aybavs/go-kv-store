@@ -107,7 +107,10 @@ Neither error changes anything: the value and its expiry are left as they were.
 
 ## Error classes
 
-Conformance tests compare error **class**, not exact message text.
+**The class is the contract; the message text is not.** A client should branch
+on the class — that is what this enumeration is for — and the wording is free to
+change within a major version because it exists to be read by a person at a
+terminal. The conformance suite compares classes for the same reason.
 
 | Class | Message | Connection |
 |---|---|---|
