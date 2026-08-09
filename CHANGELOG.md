@@ -6,6 +6,52 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-08-09
+
+Performance. The measurement came first, in its own change, so that the
+optimisation could not shape the tool that judged it.
+
+### Added
+
+- An end-to-end measurement harness that counts **syscalls per command
+  directly** rather than inferring them from throughput, reports latency
+  distributions, and runs configurations interleaved with the spread printed
+  beside every median. `make bench-e2e` and `make bench-profile`
+- ADR-0006, on flushing a reply when the reader is about to block
+
+### Changed
+
+- **A reply is flushed when the reader is about to block, not after every
+  command.** A pipelined batch now costs one write syscall instead of one per
+  command: 1.000 writes per command before, 0.016 after, on a 64-deep pipeline.
+  Throughput on pipelined workloads improved between 2.3× and 14×
+
+  The mechanism inverts the question rather than answering it. Asking "is a
+  complete command already buffered?" needs a second parser and the obvious
+  approximation of it — `bufio.Reader.Buffered()` — deadlocks. Flushing
+  immediately before the reader blocks needs neither, because the reader running
+  out of bytes *is* the condition, and it reports it by asking for more
+
+- A request/response client is unaffected by design and measured to be: flat at
+  one and ten connections. At fifty the difference is not separable from noise
+  by this method, and is documented as unsettled rather than rounded to a
+  conclusion
+
+### Fixed
+
+- The syscall counter in the harness counted a call after making it, leaving a
+  window in which a client held a reply the counter did not yet know about.
+  Linux CI caught it; macOS never opened the window
+
+### Notes
+
+- `docs/benchmarks.md` is re-measured in full. With pipelining this server now
+  exceeds Redis on the same machine and client — stated as one workload shape
+  rather than as a claim about either implementation
+- The remaining syscall is the read. Removing it needs an event loop, which
+  would replace the concurrency model this project exists to build, and is not
+  on the roadmap
+
 ## [0.4.0] - 2026-08-09
 
 Extended commands, and the testing that makes them worth trusting.

@@ -33,13 +33,15 @@ transactions and additional data types are explicit non-goals.
 - [x] The same generated sequences replayed through the append-only file and
       compared against live state, checked after every step
 
-## v0.5 — Performance
+## v0.5 — Performance ✅
 
-- [ ] End-to-end benchmarks with latency distributions
-- [ ] `pprof`-driven optimisation — the target is **syscalls per request**, not
-      lock contention. Measured at v0.3.0: ~99% of CPU is syscalls and
-      scheduling, and the engine lock does not appear in the profile at all
-- [ ] `docs/benchmarks.md` with reproducible results
+- [x] End-to-end harness with latency distributions, interleaved repetitions and
+      a direct count of syscalls per command
+- [x] `pprof`-driven optimisation — the target was **syscalls per request**, not
+      lock contention. A reply is now flushed when the reader is about to block,
+      so a pipelined batch costs one write instead of one per command
+      (1.000 → 0.016 writes per command at pipeline 64)
+- [x] `docs/benchmarks.md` with results reproducible by one documented command
 
 Sharding is **not** on this list. ADR-0001 reserved it for the case where
 measurement justified it, and the measurement says it would address something

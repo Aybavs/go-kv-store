@@ -42,6 +42,9 @@ mattered are written down in [docs/design-decisions](docs/design-decisions).
 - **Seeded command-sequence generation** — bounded random sequences over a small
   key space, run against both Redis and our own crash recovery, because the
   states worth testing are the ones nobody thinks to write down
+- **One write syscall per batch, not per reply** — a reply is flushed when the
+  reader is about to block, which is the only moment at which holding it would
+  be wrong. Syscalls per command are counted directly rather than inferred
 
 ## Architecture
 
@@ -120,14 +123,15 @@ there is no precedence rule to learn.
 
 ## Benchmarks
 
-Micro-benchmark baselines with full environment details are in
-[docs/benchmarks.md](docs/benchmarks.md). End-to-end throughput and latency
-distributions arrive in v0.5.
+Micro-benchmarks, end-to-end throughput, latency distributions and syscalls per
+command are in [docs/benchmarks.md](docs/benchmarks.md), each reproducible by a
+documented command.
 
 ## Roadmap
 
 Expiration (v0.2), append-only persistence with crash recovery (v0.3), extended
-commands (v0.4), performance work (v0.5). See [ROADMAP.md](ROADMAP.md).
+commands (v0.4), performance work (v0.5). Next is v1.0: a documentation audit
+and a stable contract. See [ROADMAP.md](ROADMAP.md).
 
 ## Development
 
