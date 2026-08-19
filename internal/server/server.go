@@ -153,18 +153,27 @@ func (s *Server) admit(conn net.Conn) bool {
 }
 
 func (s *Server) releaseConn(conn net.Conn) {
+	clearScanSessions := false
 	s.mu.Lock()
 	if _, ok := s.conns[conn]; ok {
 		delete(s.conns, conn)
 		s.nClient--
+		clearScanSessions = s.nClient == 0 && s.isDraining()
 	}
 	s.mu.Unlock()
+	// A handler can outlive bounded shutdown and create a session after the
+	// shutdown path's immediate clear. The last real handler closes that gap,
+	// without ever overlapping the server mutex and the session-manager lock.
+	if clearScanSessions {
+		s.eng.ClearScanSessions()
+	}
 	_ = conn.Close()
 }
 
 // gracefulShutdown implements RUNNING -> DRAINING -> STOPPED. v0.1 has no
 // persistence, so the finalisation stage is a no-op; v0.3 adds it here.
 func (s *Server) gracefulShutdown() error {
+	defer s.eng.ClearScanSessions()
 	s.log.Info("shutdown: draining")
 	_ = s.ln.Close()
 
@@ -231,6 +240,7 @@ func (s *Server) gracefulShutdown() error {
 // fatalShutdown is a distinct path: there is no drain guarantee and no
 // durability claim. See spec §7.5.
 func (s *Server) fatalShutdown(cause error) error {
+	defer s.eng.ClearScanSessions()
 	// Best effort: the process is going down either way, and a worker still
 	// holding the lock must not delay reporting why.
 	stopCtx, cancel := context.WithTimeout(context.Background(), time.Second)

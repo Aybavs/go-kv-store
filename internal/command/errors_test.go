@@ -50,6 +50,11 @@ func TestDocumentedErrorClassesAreProduced(t *testing.T) {
 			want:  "ERR increment or decrement would overflow",
 			steps: [][]string{{"SET", "k", "9223372036854775807"}, {"INCR", "k"}},
 		},
+		{
+			class: "invalid cursor",
+			want:  "ERR invalid cursor",
+			steps: [][]string{{"SCAN", "not-a-cursor"}},
+		},
 	}
 
 	for _, tc := range tests {
@@ -93,6 +98,26 @@ func TestErrorTextThatDispatchCannotReach(t *testing.T) {
 		if !strings.Contains(mutationErrorTexts(), tc.want) {
 			t.Errorf("class %q text %q is no longer produced by mutationError", tc.class, tc.want)
 		}
+	}
+}
+
+func TestScanEngineErrorsUsePublicClassesAndInternalFallback(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+		want string
+	}{
+		{"invalid cursor", engine.ErrInvalidCursor, "ERR invalid cursor"},
+		{"session limit", engine.ErrScanSessionLimit, "ERR scan session limit reached"},
+		{"MATCH changed", engine.ErrScanMatchChanged, "ERR scan MATCH cannot change during iteration"},
+		{"unexpected manager error", errors.New("token source failed"), "ERR internal error"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := scanError(tc.err)
+			if got.Kind != ReplyError || got.Str != tc.want {
+				t.Fatalf("scanError(%v) = %+v, want error %q", tc.err, got, tc.want)
+			}
+		})
 	}
 }
 

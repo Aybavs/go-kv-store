@@ -30,7 +30,7 @@ RESP2 or fail to connect.
 | Integer | `:1\r\n` | `DEL`, `EXISTS`, `INCR`, `DECR` |
 | Bulk String | `$3\r\nfoo\r\n` | `GET` |
 | Null Bulk String | `$-1\r\n` | `GET` on a missing key, and each missing key inside an `MGET` |
-| Array | `*2\r\n...` | `MGET` |
+| Array | `*<count>\r\n...` | `MGET`; `KEYS`; `SCAN`, whose second element is another Array |
 
 Simple String and Error replies are single lines terminated by the CRLF the
 encoder appends, so they carry no length prefix. Any CR or LF inside such a
@@ -56,9 +56,68 @@ payload and are returned unaltered.
 | `MGET key [key ...]` | ≥2 | Array, one element per key in request order |
 | `INCR key` | 2 | Integer: the value after adding one |
 | `DECR key` | 2 | Integer: the value after subtracting one |
+| `KEYS pattern` | 2 | Array of matching logically live key names |
+| `SCAN cursor [MATCH pattern] [COUNT n]` | ≥2 | Array: Bulk cursor, then an Array of key names |
+| `DBSIZE` | 1 | Integer: logically live key count |
 
 Command names are case-insensitive. Keys and values are binary-safe: any byte
 sequence is permitted, including NUL and CRLF.
+
+## Key discovery
+
+`SCAN 0` captures a point-in-time snapshot of logically live **key names**. It
+does not capture values: a value can change immediately after capture. Names
+created later are absent, while a name deleted or expired after capture may
+still be returned. Follow every replacement cursor to `0` and every captured
+matching name is returned exactly once. The snapshot is filtered once by
+`MATCH`, sorted bytewise, and then paged. Ordering is deliberately not part of
+the client contract.
+
+The reply has the standard nested RESP2 shape:
+
+    *2\r\n
+    $<cursor-length>\r\n<cursor>\r\n
+    *<key-count>\r\n
+    $<key-length>\r\n<key>\r\n
+    ...
+
+Cursor `0` starts a traversal and a returned cursor of `0` completes it. Every
+nonzero cursor is an opaque unsigned-decimal, single-use token. A successful
+nonterminal continuation consumes it and returns a replacement; clients must
+neither interpret its number nor reuse it. Malformed, negative, overflowing,
+unknown, expired, completed, and already consumed cursors all return
+`ERR invalid cursor`. All outstanding cursors are invalid after a server
+restart.
+
+`MATCH` defaults to `*` and is fixed when the session is created. A continuation
+may omit it or repeat the identical bytes. A different pattern returns
+`ERR scan MATCH cannot change during iteration` without consuming the cursor.
+Matching is Redis-style glob matching over bytes, not Unicode characters.
+
+`COUNT` defaults to 10, must be positive, and may change between pages. It sets
+the page size; the last page may be shorter. It does not bound creation work:
+the initial call always snapshots all logically live names, filters the whole
+snapshot, and sorts all retained names. Continuations page the retained
+snapshot without taking another data snapshot, filtering, or sorting.
+
+An unfinished traversal expires after 30 seconds without a successful
+continuation. The server retains at most 16 sessions and a conservative 128 MiB
+estimate across them. If either bound would be exceeded, creation returns
+`ERR scan session limit reached`; the client may finish an existing traversal,
+wait for abandoned sessions to expire, or retry with a larger `COUNT` when that
+can finish in one page. Sessions are also released at completion and shutdown.
+These bounds are fixed server policy, not configuration flags.
+
+`KEYS pattern` uses the same live-key snapshot and byte glob matcher. It first
+snapshots N live names in O(N), then bytewise-sorts all N names with O(N log N)
+comparisons in the worst case, and finally scans and matches the sorted names in
+O(N). It is intended only for debugging and small datasets; use `SCAN` for a key
+browser. Sorting makes results deterministic, but clients must not depend on
+that ordering.
+
+`DBSIZE` is an O(N) count of logically live keys. It does not expose the raw map
+length, so expired entries awaiting physical reclamation are not counted, and
+it performs no key-snapshot allocation.
 
 ## Expiration
 
@@ -124,6 +183,9 @@ terminal. The conformance suite compares classes for the same reason.
 | not an integer | `ERR value is not an integer or out of range` | stays open |
 | invalid expire time | `ERR invalid expire time in '<name>' command` | stays open |
 | overflow | `ERR increment or decrement would overflow` | stays open |
+| invalid cursor | `ERR invalid cursor` | stays open |
+| scan resource limit | `ERR scan session limit reached` | stays open |
+| scan MATCH changed | `ERR scan MATCH cannot change during iteration` | stays open |
 | shutting down | `ERR server is shutting down` | stays open |
 | internal error | `ERR internal error` | stays open |
 | max clients | `ERR max number of clients reached` | **closed** |
@@ -161,6 +223,11 @@ Both are pinned by tests in `internal/command`.
   replies to an option it does not recognise — so the texts agree while the
   behaviour does not.
 - `PTTL`, `PEXPIRE`, `EXPIREAT` and `PEXPIREAT` are not implemented.
+- `SCAN` uses the standard nested RESP2 reply shape but deliberately does not
+  use Redis's stateless incremental hash-table cursor. Its cursor identifies a
+  bounded server-side key-name snapshot session and is single-use.
+- Pub/Sub, keyspace notifications and `MONITOR` are not implemented. Discovery
+  is polling, not a change stream.
 - `MSET`, `INCRBY`, `DECRBY`, `INCRBYFLOAT`, `GETSET` and `SETNX` are not
   implemented. `MSET` is a deliberate omission rather than a gap: it cannot be
   expressed as a single canonical append-only record, and one complete record is

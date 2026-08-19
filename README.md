@@ -19,10 +19,12 @@ authentication, no TLS. See [Limitations](#limitations).
 
 ## Compatibility
 
-From 1.0, every `1.x` release is compatible with every other in five respects:
-the documented **command set and reply shapes**, the **error classes** in
+From 1.0, every `1.x` release preserves five surfaces: every already documented
+**command and reply shape**, the **error classes** in
 [docs/protocol.md](docs/protocol.md), **flag names and their defaults**,
 **append-only file format version 1**, and **process exit codes**.
+Minor releases may add commands; they may not remove or reshape an existing
+documented command.
 
 Deliberately not covered: exact error message text (the class is the contract,
 the wording exists to be read), log output, performance figures, and the Go
@@ -49,9 +51,12 @@ mattered are written down in [docs/design-decisions](docs/design-decisions).
 - **Differential testing against real Redis** — the documented command subset is
   compared against a reference implementation, not just against our own
   expectations
-- **One lock, in one place** — `engine` owns the only mutex; `store` is a passive
-  data structure with no locks, goroutines, I/O or clock reads, so its tests are
-  fully deterministic
+- **Locks stay above the store** — `engine` owns the data `RWMutex` and the scan
+  session manager has a separate mutex; they are never held together. `store`
+  remains passive, with no locks, goroutines, I/O or clock reads
+- **Bounded key discovery** — `SCAN` captures matching live key names once and
+  pages that snapshot through expiring, opaque cursors; it adds no ordered
+  write-path index and never snapshots values
 - **No buffer aliasing** — parser output is borrowed; anything the store keeps is
   copied to an immutable string, asserted by dedicated tests
 - **Graceful shutdown that means something** — mutation admission closes inside
@@ -130,6 +135,9 @@ With Docker:
 | `PERSIST key` | `1` if a TTL was removed, `0` otherwise |
 | `MGET key [key ...]` | one value per key, nil where absent |
 | `INCR key` / `DECR key` | the value after the change; any TTL is preserved |
+| `KEYS pattern` | all matching logically live key names; debugging/small datasets only |
+| `SCAN cursor [MATCH pattern] [COUNT n]` | cursor plus a page of key names |
+| `DBSIZE` | number of logically live keys |
 
 Full wire format, error classes and the deviations from Redis are in
 [docs/protocol.md](docs/protocol.md). If you are writing a client or a user
@@ -172,8 +180,8 @@ documented command.
 ## Roadmap
 
 Expiration (v0.2), append-only persistence with crash recovery (v0.3), extended
-commands (v0.4), performance work (v0.5). Next is v1.0: a documentation audit
-and a stable contract. See [ROADMAP.md](ROADMAP.md).
+commands (v0.4), performance work (v0.5), a stable 1.x contract (v1.0), and
+bounded key discovery (v1.1). See [ROADMAP.md](ROADMAP.md).
 
 ## Development
 
@@ -205,6 +213,8 @@ Stated plainly rather than buried:
 - **Expiration is per-key only.** No eviction policy and no maxmemory.
 - **Strings only.** No List, Hash or Set.
 - **No transactions and no Pub/Sub.**
+- **No keyspace notifications.** A browser must refresh or poll; `SCAN` is a
+  point-in-time snapshot of key names, not a subscription or a value snapshot.
 - **No `MSET`.** Not an oversight: it cannot be expressed as one canonical
   append-only record, and one complete record is one recovery atomicity unit.
   Extending the record vocabulary is a decision for its own milestone. `MGET` is

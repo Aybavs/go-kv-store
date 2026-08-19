@@ -1,6 +1,7 @@
 package store
 
 import (
+	"strconv"
 	"testing"
 	"time"
 )
@@ -57,5 +58,23 @@ func BenchmarkStoreGetMiss(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		s.Get("absent", benchNow)
+	}
+}
+
+func BenchmarkStoreLiveKeys(b *testing.B) {
+	for _, size := range []int{1_000, 10_000, 100_000} {
+		b.Run(strconv.Itoa(size), func(b *testing.B) {
+			s := New()
+			for i := 0; i < size; i++ {
+				s.Set("key:"+strconv.Itoa(i), "v", time.Time{}, false)
+			}
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				if got := s.LiveKeys(benchNow); len(got) != size {
+					b.Fatalf("LiveKeys returned %d keys, want %d", len(got), size)
+				}
+			}
+		})
 	}
 }

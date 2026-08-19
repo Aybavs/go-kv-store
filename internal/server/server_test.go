@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -112,6 +113,50 @@ func (c *client) readReply(t *testing.T) string {
 	return line
 }
 
+func (c *client) readBulkReply(t *testing.T) string {
+	t.Helper()
+	payload, err := c.readBulkReplyResult(t)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return payload
+}
+
+func (c *client) readBulkReplyResult(t *testing.T) (string, error) {
+	t.Helper()
+	_ = c.conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+	header, err := c.br.ReadString('\n')
+	if err != nil {
+		return "", err
+	}
+	if !strings.HasSuffix(header, "\r\n") {
+		return "", errors.New("bulk reply header does not end in CRLF")
+	}
+	header = strings.TrimSuffix(header, "\r\n")
+	if len(header) < 2 || header[0] != '$' {
+		return "", errors.New("reply element is not a RESP2 bulk string")
+	}
+	for i := 1; i < len(header); i++ {
+		if header[i] < '0' || header[i] > '9' {
+			return "", errors.New("bulk reply length is not an unsigned decimal")
+		}
+	}
+	length, err := strconv.ParseUint(header[1:], 10, 64)
+	maxInt := int(^uint(0) >> 1)
+	if err != nil || length > uint64(maxInt-2) {
+		return "", errors.New("bulk reply length is out of range")
+	}
+	payloadLength := int(length)
+	payload := make([]byte, payloadLength+2)
+	if _, err := io.ReadFull(c.br, payload); err != nil {
+		return "", err
+	}
+	if payload[payloadLength] != '\r' || payload[payloadLength+1] != '\n' {
+		return "", errors.New("bulk reply payload does not end in CRLF")
+	}
+	return string(payload[:payloadLength]), nil
+}
+
 func itoa(n int) string {
 	if n == 0 {
 		return "0"
@@ -130,6 +175,35 @@ func atoi(s string) int {
 		n = n*10 + int(s[i]-'0')
 	}
 	return n
+}
+
+func TestReadBulkReplyRejectsMalformedTerminator(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		frame string
+	}{
+		{name: "header CRLF", frame: "$1\na\r\n"},
+		{name: "payload CRLF", frame: "$1\r\naXX"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			reader, writer := net.Pipe()
+			defer reader.Close()
+
+			wrote := make(chan error, 1)
+			go func() {
+				_, err := io.WriteString(writer, tc.frame)
+				_ = writer.Close()
+				wrote <- err
+			}()
+
+			c := &client{conn: reader, br: bufio.NewReader(reader)}
+			if payload, err := c.readBulkReplyResult(t); err == nil {
+				t.Errorf("malformed bulk terminator accepted with payload %q", payload)
+			}
+			_ = reader.Close()
+			<-wrote
+		})
+	}
 }
 
 func TestServerPing(t *testing.T) {
@@ -362,5 +436,52 @@ func TestServerMGetArrayFraming(t *testing.T) {
 	c.send(t, "PING")
 	if got := c.readReply(t); got != "+PONG" {
 		t.Fatalf("PING after MGET got %q; the array left the stream misaligned", got)
+	}
+}
+
+// TestServerScanNestedArrayFraming pins SCAN's nested RESP2 reply and verifies
+// that consuming the whole reply leaves the connection at the next boundary.
+func TestServerScanNestedArrayFraming(t *testing.T) {
+	addr, _ := startServer(t, nil)
+	c := dial(t, addr)
+	for _, key := range []string{"a", "b"} {
+		c.send(t, "SET", key, "v")
+		if got := c.readReply(t); got != "+OK" {
+			t.Fatalf("SET %s = %q", key, got)
+		}
+	}
+
+	c.send(t, "SCAN", "0", "COUNT", "1")
+	if got := c.readReply(t); got != "*2" {
+		t.Fatalf("first SCAN outer header = %q, want *2", got)
+	}
+	firstCursor := c.readBulkReply(t)
+	if cursor, err := strconv.ParseUint(firstCursor, 10, 64); err != nil || cursor == 0 {
+		t.Fatalf("first SCAN cursor = %q, want nonzero unsigned decimal bulk string", firstCursor)
+	}
+	if got := c.readReply(t); got != "*1" {
+		t.Fatalf("first SCAN key array header = %q, want *1", got)
+	}
+	if got := c.readBulkReply(t); got != "a" {
+		t.Fatalf("first SCAN key = %q, want bulk string a", got)
+	}
+
+	c.send(t, "SCAN", firstCursor, "COUNT", "1")
+	if got := c.readReply(t); got != "*2" {
+		t.Fatalf("second SCAN outer header = %q, want *2", got)
+	}
+	if got := c.readBulkReply(t); got != "0" {
+		t.Fatalf("second SCAN cursor = %q, want bulk string 0", got)
+	}
+	if got := c.readReply(t); got != "*1" {
+		t.Fatalf("second SCAN key array header = %q, want *1", got)
+	}
+	if got := c.readBulkReply(t); got != "b" {
+		t.Fatalf("second SCAN key = %q, want bulk string b", got)
+	}
+
+	c.send(t, "PING")
+	if got := c.readReply(t); got != "+PONG" {
+		t.Fatalf("PING after SCAN = %q; stream is misaligned", got)
 	}
 }

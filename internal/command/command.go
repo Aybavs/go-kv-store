@@ -44,6 +44,9 @@ func New(e *engine.Engine) *Registry {
 	r.cmds["EXPIRE"] = spec{minArgs: 3, maxArgs: 3, run: cmdExpire}
 	r.cmds["TTL"] = spec{minArgs: 2, maxArgs: 2, run: cmdTTL}
 	r.cmds["PERSIST"] = spec{minArgs: 2, maxArgs: 2, run: cmdPersist}
+	r.cmds["KEYS"] = spec{minArgs: 2, maxArgs: 2, run: cmdKeys}
+	r.cmds["SCAN"] = spec{minArgs: 2, maxArgs: -1, run: cmdScan}
+	r.cmds["DBSIZE"] = spec{minArgs: 1, maxArgs: 1, run: cmdDBSize}
 	return r
 }
 

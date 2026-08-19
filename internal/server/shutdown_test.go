@@ -3,6 +3,7 @@ package server
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -16,6 +17,121 @@ import (
 	"github.com/aybavs/go-kv-store/internal/engine"
 	"github.com/aybavs/go-kv-store/internal/resp"
 )
+
+func fillDefaultScanSessionLimit(e *engine.Engine) ([]uint64, error) {
+	tokens := make([]uint64, 0, 16)
+	for i := 0; i < 16; i++ {
+		page, err := e.Scan(engine.ScanRequest{Count: 1})
+		if err != nil {
+			return nil, fmt.Errorf("start session %d: %w", i, err)
+		}
+		if page.Cursor == 0 {
+			return nil, fmt.Errorf("start session %d returned terminal cursor", i)
+		}
+		tokens = append(tokens, page.Cursor)
+	}
+	if _, err := e.Scan(engine.ScanRequest{Count: 1}); !errors.Is(err, engine.ErrScanSessionLimit) {
+		return nil, fmt.Errorf("session 17 error = %v, want %v", err, engine.ErrScanSessionLimit)
+	}
+	return tokens, nil
+}
+
+func TestShutdownClearsSessionsCreatedAfterReturnWhenLastHandlerExits(t *testing.T) {
+	fatalCause := errors.New("fatal scan cleanup test")
+	for _, tc := range []struct {
+		name      string
+		maxReturn time.Duration
+		shutdown  func(*Server, *Supervisor) error
+		wantErr   error
+	}{
+		{
+			name:      "graceful",
+			maxReturn: 3 * time.Second,
+			shutdown: func(s *Server, _ *Supervisor) error {
+				return s.gracefulShutdown()
+			},
+			wantErr: ErrShutdownTimeout,
+		},
+		{
+			name:      "fatal",
+			maxReturn: 300 * time.Millisecond,
+			shutdown: func(s *Server, sup *Supervisor) error {
+				sup.Fatal(fatalCause)
+				return s.fatalShutdown(fatalCause)
+			},
+			wantErr: fatalCause,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, sup, _ := newBoundServer(t)
+			srv.cfg.ShutdownTimeout = 10 * time.Millisecond
+			for i := 0; i < 17; i++ {
+				if err := srv.eng.Set(fmt.Sprintf("scan:%02d", i), "v", engine.NoExpiry()); err != nil {
+					t.Fatalf("seed scan key %d: %v", i, err)
+				}
+			}
+			handlerStarted := make(chan struct{})
+			allowSessionCreation := make(chan struct{})
+			retained := make(chan struct {
+				tokens []uint64
+				err    error
+			}, 1)
+			client, conn := net.Pipe()
+			defer client.Close()
+			handlerFinished := register(srv, conn, func() {
+				<-srv.draining
+				close(handlerStarted)
+				<-allowSessionCreation
+				tokens, err := fillDefaultScanSessionLimit(srv.eng)
+				retained <- struct {
+					tokens []uint64
+					err    error
+				}{tokens: tokens, err: err}
+			})
+
+			shutdownDone := make(chan error, 1)
+			go func() { shutdownDone <- tc.shutdown(srv, sup) }()
+			<-handlerStarted
+			var shutdownErr error
+			select {
+			case shutdownErr = <-shutdownDone:
+			case <-time.After(tc.maxReturn):
+				close(allowSessionCreation)
+				created := <-retained
+				<-handlerFinished
+				<-shutdownDone
+				if created.err != nil {
+					t.Fatalf("handler session setup after slow shutdown: %v", created.err)
+				}
+				t.Fatalf("shutdown did not return within %v while a handler remained active", tc.maxReturn)
+			}
+			if !errors.Is(shutdownErr, tc.wantErr) {
+				t.Errorf("shutdown error = %v, want %v", shutdownErr, tc.wantErr)
+			}
+
+			// The shutdown function has returned and its immediate deferred clear
+			// has already run. This handler now creates sessions deliberately late.
+			close(allowSessionCreation)
+			created := <-retained
+			if created.err != nil {
+				t.Fatalf("handler session setup: %v", created.err)
+			}
+			<-handlerFinished
+
+			for _, cursor := range created.tokens {
+				if _, err := srv.eng.Scan(engine.ScanRequest{Cursor: cursor, Count: 1}); !errors.Is(err, engine.ErrInvalidCursor) {
+					t.Fatalf("cursor %d after shutdown error = %v, want %v", cursor, err, engine.ErrInvalidCursor)
+				}
+			}
+			for i := 0; i < 16; i++ {
+				page, err := srv.eng.Scan(engine.ScanRequest{Count: 1})
+				if err != nil || page.Cursor == 0 {
+					t.Fatalf("replacement session %d = (%+v, %v), want released capacity", i, page, err)
+				}
+			}
+		})
+	}
+}
 
 // The six shutdown behaviours the design spec enumerates and the suite did not
 // cover. Two are error paths nothing had executed: ErrShutdownTimeout, and the
@@ -64,17 +180,21 @@ func (c *blockingConn) Close() error {
 // register attaches a fake handler to the server: a connection in the set and a
 // goroutine in the wait group, which is exactly what a real one contributes to
 // shutdown. body decides when that handler finishes.
-func register(s *Server, conn net.Conn, body func()) {
+func register(s *Server, conn net.Conn, body func()) <-chan struct{} {
 	s.mu.Lock()
 	s.conns[conn] = struct{}{}
 	s.nClient++
 	s.mu.Unlock()
 
+	finished := make(chan struct{})
 	s.wg.Add(1)
 	go func() {
+		defer close(finished)
 		defer s.wg.Done()
+		defer s.releaseConn(conn)
 		body()
 	}()
+	return finished
 }
 
 // Spec §10.2 (2): a command already executing when the signal arrives is
